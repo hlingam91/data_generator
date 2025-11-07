@@ -1,0 +1,9 @@
+[project]
+name = "datagenerator"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.10"
+dependencies = [
+    "kafka-python>=2.0.2",
+    "faker>=20.0.0",
+]
