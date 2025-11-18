@@ -2,7 +2,7 @@
 	# Inputs: Custom Fields with datatype n range selection for fields like dates, numbers, strings, booleans, etc. -- pushes to kafka messages in range/out of range
 	# Output: how many messages in range/out of range were pushed to kafka
 # Sample messages format:
-# {"insert": {"site_id": "boomtrain","bsin": "0002ac00-83ce-4071-bcd2-7a1089812b621","user_id": "6900077","email": "","contacts": {},"properties": {  "has_active_email": "true","all_emails": "true", "double_optin": "true", "shopping_cart":{"total": 5000},"signed_up_at": "2025-10-15 23:05:00", "appointment_time": "2025-10-15 05:31:00", "last_purchase": {"datafields": {"total":200}} },"last_updated": "2025-04-25 0:00:00","replaced_by": "","email_md5": "","sub_site_ids": [],"scoped_properties": {},"scoped_contacts": {},"imported_from": {},"consent": {},"external_ids": {},"unique_client_ids": [],"merged_bsins": []   }}
+# {"insert": {"site_id": "boomtrain","bsin": "0002ac00-83ce-4071-bcd2-7a1089812b621","user_id": "6900077","email": "","contacts": {},"properties": {  "has_active_email": "true","all_emails": "true", "double_optin": "true", "shopping_cart":{"total": 5000},"signed_up_at": "2025-10-15 23:05:00", "appointment_time": "2025-10-15 05:31:00", "last_purchase": {"datafields": {"total":200, "items": [{"item_id": 1, "item_name": "brush"}]}} },"last_updated": "2025-04-25 0:00:00","replaced_by": "","email_md5": "","sub_site_ids": [],"scoped_properties": {},"scoped_contacts": {},"imported_from": {},"consent": {},"external_ids": {},"unique_client_ids": [],"merged_bsins": []   }}
 # {"insert": {"site_id": "boomtrain","bsin": "6test2fecc6aa9-81cc-4370-aba9-a35d95ae4969","user_id": "6900077","email": "","contacts": {"email::hlingam@zetaglobal.com":  { "type": "email","value": "hlingam@zetaglobal.com","status": "inactive","preferences": ["standard"],"inactivity_reason": "unsubscribed","created_at": 1536238279,"updated_at": 1701117523,"last_inactivity_updated_at": 1605806750,"last_clicked": null,"last_opened": null,"last_sent": 1701117491,"last_purchased": null,"domain": "zetaglobal.com","signed_up_at": 1536238279,"double_opt_in_status": null,"country_code": null,"area_code": null,"timezone": null,"geolocation": null,"phone_type": null,"contact_properties": null}}, "properties": { "has_active_email": "true", "shopping_cart":{"total": 10000},"signed_up_at": "2025-10-21 21:00:00","signed_up": "2025-10-21 21:00:00", "appointment_time": "2025-10-15 05:31:00"  },"last_updated": "2025-04-25 0:00:00","replaced_by": "","email_md5": "","sub_site_ids": [],"scoped_properties": {},"scoped_contacts":{},"imported_from": {},"consent": {},"external_ids": {},"unique_client_ids": [],"merged_bsins": []   }}
 
 import json
@@ -13,14 +13,41 @@ from faker import Faker
 from producers.kafka_producer import KafkaProducer
 import time
 import argparse
+from threading import Thread, Lock
+from queue import Queue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# Custom struct generators registry
+# Add more custom structures here as needed
+CUSTOM_STRUCT_GENERATORS = {
+    "purchase": lambda faker: {
+        "datafields": {
+            "total": random.randint(100, 5000),
+            "items": [
+                {
+                    "item_id": random.randint(1, 1000),
+                    "item_name": faker.word()
+                }
+                for _ in range(random.randint(1, 5))  # Generate 1-5 items
+            ]
+        }
+    },
+    # Example of another custom structure for future use
+    # "order": lambda faker: {
+    #     "datafields": {
+    #         "order_id": faker.uuid4(),
+    #         "status": random.choice(["pending", "completed", "cancelled"]),
+    #         "metadata": {"source": "web", "device": "mobile"}
+    #     }
+    # }
+}
+
 MESSAGE_COUNT = 1
 CONDITIONAL_FIELDS = []
-# CONDITIONAL_FIELDS = ["and", ["eq", "user.all_emails", "true"], ["withinlast", "user.signed_up_at", "30", "days"]]
+# CONDITIONAL_FIELDS = ["and", ["eq", "user.double_optin", "true"],["eq", "user.has_active_email", "true"],["eq", "user.all_emails", "true"], ["withinlast", "user.signed_up_at", "30", "days"]]
 
 DEFAULT_MESSAGE_FIELDS = {
     "site_id": "string",
@@ -38,7 +65,7 @@ properties = {"has_active_email": "bool_str",
               "double_optin": "bool_str",
               "signed_up_at": "datetime",
               "appointment_time": "datetime",
-              "last_purchase": "map<int>"}
+              "last_purchase": "custom_struct:purchase"}
 
 class UserPropsGenerator:
     def __init__(self, kafka_broker: str, kafka_topic: str, *args, **kwargs):
@@ -53,8 +80,13 @@ class UserPropsGenerator:
         self.conditional_fields = kwargs.get("conditional_fields", CONDITIONAL_FIELDS)
         self.total_messages = kwargs.get("total_messages", MESSAGE_COUNT)
         self.target_true_count = kwargs.get("target_true_count", self.total_messages//2)
+        self.num_threads = kwargs.get("num_threads", 1)
         self.true_count = 0
         self.false_count = 0
+        self.count_lock = Lock()
+        self.start_time = None
+        self.end_time = None
+        self.flush_interval = kwargs.get("flush_interval", 1000)  # Flush every N messages
 
     def _parse_conditions(self):
         """Parse conditional fields to extract field requirements"""
@@ -88,6 +120,16 @@ class UserPropsGenerator:
         if condition_value is not None:
             return condition_value
         
+        # Handle custom struct types
+        if data_type.startswith("custom_struct:"):
+            struct_type = data_type.split(":", 1)[1]
+            generator_func = CUSTOM_STRUCT_GENERATORS.get(struct_type)
+            if generator_func:
+                return generator_func(self.faker)
+            else:
+                logger.warning(f"Unknown custom_struct type: {struct_type}")
+                return {}
+        
         if data_type == "string":
             if field_name.lower().endswith("email"):
                 return self.faker.email()
@@ -115,15 +157,17 @@ class UserPropsGenerator:
         elif data_type.startswith("map<Contact>"):
             # Generate a contact map with email as key
             email = self.faker.email()
+            time = self.faker.date_time_between(start_date='-30d', end_date='-30d').strftime('%Y-%m-%d %H:%M:%S')
             return {
+                
                 f"email::{email}": {
                     "type": "email",
                     "value": email,
                     "status": random.choice(["active", "inactive"]),
                     "preferences": ["standard"],
                     "inactivity_reason": random.choice(["unsubscribed", None]),
-                    "created_at": self.faker.unix_time(),
-                    "updated_at": self.faker.unix_time(),
+                    "created_at": time,
+                    "updated_at": time,
                     # "last_inactivity_updated_at": self.faker.unix_time(),
                     # "last_clicked": None,
                     # "last_opened": None,
@@ -207,7 +251,7 @@ class UserPropsGenerator:
             "email_md5": "",
             "sub_site_ids": [],
             "scoped_properties": {},
-            "scoped_contacts": {},
+            "scoped_contacts": {self.site: user_props["contacts"]},
             "imported_from": {},
             "consent": {},
             "external_ids": {},
@@ -248,21 +292,24 @@ class UserPropsGenerator:
 
     def push_to_kafka(self, user_props: dict):
         try:
-            print(user_props)
-            # self.kafka_producer.send(self.kafka_topic, json.dumps(user_props).encode('utf-8'))
+            # print(user_props)
+            self.kafka_producer.send(self.kafka_topic, json.dumps(user_props).encode('utf-8'))
         except Exception as e:
             logger.error(f"Failed to send message to Kafka: {e}")
             raise
 
-    def run(self):
-        count = 0
+    def _worker_thread(self, message_queue: Queue):
+        """Worker thread to generate and push messages"""
         parsed_conditions = self._parse_conditions()
+        local_count = 0
         
-        logger.info(f"Starting message generation: Total={self.total_messages}, Target True={self.target_true_count}")
-        
-        while count < self.total_messages:
-            # Determine if this message should match the condition
-            should_match = self.true_count < self.target_true_count
+        while True:
+            task = message_queue.get()
+            if task is None:  # Poison pill to stop the thread
+                message_queue.task_done()
+                break
+            
+            should_match = task
             
             # Generate user properties
             user_props = self.generate_user_props(should_match_condition=should_match)
@@ -270,18 +317,87 @@ class UserPropsGenerator:
             # Verify the condition evaluation (for tracking)
             condition_met = self._evaluate_condition(user_props["insert"], parsed_conditions) if parsed_conditions else False
             
-            if condition_met:
-                self.true_count += 1
-            else:
-                self.false_count += 1
+            with self.count_lock:
+                if condition_met:
+                    self.true_count += 1
+                else:
+                    self.false_count += 1
             
             # Push to Kafka
             self.push_to_kafka(user_props)
-            count += 1
-            time.sleep(0.1)  # Reduced sleep time
+            
+            local_count += 1
+            # Periodic flush to avoid buffering
+            if local_count % self.flush_interval == 0:
+                self.kafka_producer.flush()
+            
+            message_queue.task_done()
+
+    def run(self):
+        self.start_time = time.time()
+        logger.info(f"Starting message generation: Total={self.total_messages}, Target True={self.target_true_count}, Threads={self.num_threads}")
+        
+        if self.num_threads > 1:
+            # Multi-threaded execution
+            message_queue = Queue()
+            threads = []
+            
+            # Start worker threads
+            for _ in range(self.num_threads):
+                thread = Thread(target=self._worker_thread, args=(message_queue,))
+                thread.start()
+                threads.append(thread)
+            
+            # Add tasks to the queue
+            true_count_target = self.target_true_count
+            for i in range(self.total_messages):
+                should_match = i < true_count_target
+                message_queue.put(should_match)
+            
+            # Add poison pills to stop threads
+            for _ in range(self.num_threads):
+                message_queue.put(None)
+            
+            # Wait for all tasks to complete
+            message_queue.join()
+            
+            # Wait for all threads to finish
+            for thread in threads:
+                thread.join()
+        else:
+            # Single-threaded execution
+            count = 0
+            parsed_conditions = self._parse_conditions()
+            
+            while count < self.total_messages:
+                # Determine if this message should match the condition
+                should_match = self.true_count < self.target_true_count
+                
+                # Generate user properties
+                user_props = self.generate_user_props(should_match_condition=should_match)
+                
+                # Verify the condition evaluation (for tracking)
+                condition_met = self._evaluate_condition(user_props["insert"], parsed_conditions) if parsed_conditions else False
+                
+                if condition_met:
+                    self.true_count += 1
+                else:
+                    self.false_count += 1
+                
+                # Push to Kafka
+                self.push_to_kafka(user_props)
+                count += 1
+                
+                # Periodic flush to avoid buffering
+                if count % self.flush_interval == 0:
+                    self.kafka_producer.flush()
         
         self.kafka_producer.flush()
         self.kafka_producer.close()
+        
+        self.end_time = time.time()
+        elapsed_time = self.end_time - self.start_time
+        messages_per_sec = self.total_messages / elapsed_time if elapsed_time > 0 else 0
         
         # Report results
         print("\n" + "="*50)
@@ -292,16 +408,20 @@ class UserPropsGenerator:
         print(f"Messages with Condition FALSE: {self.false_count}")
         print(f"Target True Count: {self.target_true_count}")
         print(f"Actual Match Rate: {(self.true_count/self.total_messages)*100:.2f}%")
+        print(f"Time Taken: {elapsed_time:.2f} seconds")
+        print(f"Throughput: {messages_per_sec:.2f} messages/sec")
+        print(f"Threads Used: {self.num_threads}")
         print("="*50)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate user properties with conditional fields')
-    parser.add_argument('--total-messages', type=int, default=100, help='Total number of messages to generate')
-    parser.add_argument('--target-true-count', type=int, default=50, help='Target number of messages where condition is true')
-    parser.add_argument('--kafka-broker', type=str, default='localhost:19092', help='Kafka broker address')
-    parser.add_argument('--kafka-topic', type=str, default='identity_events', help='Kafka topic name')
+    parser.add_argument('--total-messages', type=int, default=100000000, help='Total number of messages to generate')
+    parser.add_argument('--target-true-count', type=int, default=100000000, help='Target number of messages where condition is true')
+    parser.add_argument('--kafka-broker', type=str, default="b-1.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092,b-2.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092,b-3.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092", help='Kafka broker address')
+    parser.add_argument('--kafka-topic', type=str, default='seg_poc_identity', help='Kafka topic name')
     parser.add_argument('--conditional-fields', type=str, default=None, help='JSON string of conditional fields')
+    parser.add_argument('--num-threads', type=int, default=15, help='Number of threads for parallel generation')
     
     args = parser.parse_args()
     
@@ -318,6 +438,7 @@ if __name__ == "__main__":
         kafka_topic=args.kafka_topic,
         total_messages=args.total_messages,
         target_true_count=args.target_true_count,
-        conditional_fields=conditional_fields
+        conditional_fields=conditional_fields,
+        num_threads=args.num_threads
     )
     generator.run()

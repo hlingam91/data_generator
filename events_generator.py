@@ -10,13 +10,15 @@ from faker import Faker
 from producers.kafka_producer import KafkaProducer
 import time
 import argparse
+from threading import Thread, Lock
+from queue import Queue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MESSAGE_COUNT = 1
 CONDITIONAL_FIELDS = []
-# CONDITIONAL_FIELDS = ["and", ["eq", "event.properties.cart_total", "gt", "1000"], ["eq", "event.event_type", "purchased"]]
+# CONDITIONAL_FIELDS = ["and", ["gt", "event.properties.cart_total", "gt", "1000"], ["eq", "event.event_type", "purchased"]]
 
 DEFAULT_EVENT_FIELDS = {
     "site_id": "string",
@@ -42,13 +44,37 @@ DEFAULT_EVENT_FIELDS = {
     "status": "string"
 }
 
-DEFAULT_EVENT_NAMES = ["purchased", "viewed", "clicked", "added_to_cart", "abandoned_cart"]
+DEFAULT_EVENT_NAMES = ["purchase", "viewed", "clicked", "added_to_cart", "abandoned_cart"]
 
 DEFAULT_EVENT_PROPERTIES = {
-    "cart_total": "int",
-    "departure_time": "datetime",
-    "nudge_token": "string",
-    "timestamp": "iso_datetime"
+    "purchase": {
+        "cart_total": "int",
+        "departure_time": "datetime",
+        "nudge_token": "string",
+        "timestamp": "iso_datetime",
+        "value": "int"
+    },
+    "viewed": {
+        "nudge_token": "string",
+        "timestamp": "iso_datetime",
+        "resource_type": "string"
+    },
+    "clicked": {
+        "nudge_token": "string",
+        "timestamp": "iso_datetime",
+        "url": "string"
+    },
+    "added_to_cart": {
+        "cart_total": "int",
+        "nudge_token": "string",
+        "timestamp": "iso_datetime"
+    },
+    "abandoned_cart": {
+        "cart_total": "int",
+        "departure_time": "datetime",
+        "nudge_token": "string",
+        "timestamp": "iso_datetime"
+    }
 }
 
 
@@ -66,8 +92,13 @@ class EventsGenerator:
         self.conditional_fields = kwargs.get("conditional_fields", CONDITIONAL_FIELDS)
         self.total_messages = kwargs.get("total_messages", MESSAGE_COUNT)
         self.target_true_count = kwargs.get("target_true_count", self.total_messages//2)
+        self.num_threads = kwargs.get("num_threads", 1)
         self.true_count = 0
         self.false_count = 0
+        self.count_lock = Lock()
+        self.start_time = None
+        self.end_time = None
+        self.flush_interval = kwargs.get("flush_interval", 1000)  # Flush every N messages
 
     def _parse_conditions(self):
         """Parse conditional fields to extract field requirements"""
@@ -189,13 +220,33 @@ class EventsGenerator:
         """Generate event record based on the fields and datatypes"""
         parsed_conditions = self._parse_conditions()
         
+        # First, determine the event_type
+        event_type = None
+        if should_match_condition and parsed_conditions:
+            event_type = self._get_condition_value("event_type", parsed_conditions, True)
+        elif not should_match_condition and parsed_conditions:
+            event_type = self._get_condition_value("event_type", parsed_conditions, False)
+        
+        if not event_type:
+            event_type = random.choice(self.event_names)
+        
+        # Get properties schema for this event type
+        if isinstance(self.properties_schema, dict) and event_type in self.properties_schema:
+            event_properties_schema = self.properties_schema[event_type]
+        elif isinstance(self.properties_schema, dict) and any(isinstance(v, dict) for v in self.properties_schema.values()):
+            # properties_schema is event-name-based, but event_type not found, use first available
+            event_properties_schema = next((v for v in self.properties_schema.values() if isinstance(v, dict)), {})
+        else:
+            # properties_schema is flat (backward compatibility)
+            event_properties_schema = self.properties_schema
+        
         # Generate base event fields
         event_data = {}
         for field, field_type in DEFAULT_EVENT_FIELDS.items():
             if field == "properties":
-                # Generate properties based on properties_schema
+                # Generate properties based on event-specific properties_schema
                 props = {}
-                for prop_name, prop_type in self.properties_schema.items():
+                for prop_name, prop_type in event_properties_schema.items():
                     condition_value = None
                     
                     if should_match_condition and parsed_conditions:
@@ -205,6 +256,9 @@ class EventsGenerator:
                     
                     props[prop_name] = self._generate_value(prop_name, prop_type, condition_value)
                 event_data[field] = props
+            elif field == "event_type":
+                # Use the already determined event_type
+                event_data[field] = event_type
             else:
                 condition_value = None
                 if should_match_condition and parsed_conditions:
@@ -276,30 +330,102 @@ class EventsGenerator:
             logger.error(f"Failed to send message to Kafka: {e}")
             raise
 
-    def run(self):
-        count = 0
+    def _worker_thread(self, message_queue: Queue):
+        """Worker thread to generate and push events"""
         parsed_conditions = self._parse_conditions()
+        local_count = 0
         
-        logger.info(f"Starting event generation: Total={self.total_messages}, Target True={self.target_true_count}")
-        
-        while count < self.total_messages:
-            should_match = self.true_count < self.target_true_count
+        while True:
+            task = message_queue.get()
+            if task is None:  # Poison pill to stop the thread
+                message_queue.task_done()
+                break
             
+            should_match = task
+            
+            # Generate event
             event_data = self.generate_event(should_match_condition=should_match)
             
+            # Verify the condition evaluation (for tracking)
             condition_met = self._evaluate_condition(event_data, parsed_conditions) if parsed_conditions else False
             
-            if condition_met:
-                self.true_count += 1
-            else:
-                self.false_count += 1
+            with self.count_lock:
+                if condition_met:
+                    self.true_count += 1
+                else:
+                    self.false_count += 1
             
+            # Push to Kafka
             self.push_to_kafka(event_data)
-            count += 1
-            time.sleep(0.1)
+            
+            local_count += 1
+            # Periodic flush to avoid buffering
+            if local_count % self.flush_interval == 0:
+                self.kafka_producer.flush()
+            
+            message_queue.task_done()
+
+    def run(self):
+        self.start_time = time.time()
+        logger.info(f"Starting event generation: Total={self.total_messages}, Target True={self.target_true_count}, Threads={self.num_threads}")
+        
+        if self.num_threads > 1:
+            # Multi-threaded execution
+            message_queue = Queue()
+            threads = []
+            
+            # Start worker threads
+            for _ in range(self.num_threads):
+                thread = Thread(target=self._worker_thread, args=(message_queue,))
+                thread.start()
+                threads.append(thread)
+            
+            # Add tasks to the queue
+            true_count_target = self.target_true_count
+            for i in range(self.total_messages):
+                should_match = i < true_count_target
+                message_queue.put(should_match)
+            
+            # Add poison pills to stop threads
+            for _ in range(self.num_threads):
+                message_queue.put(None)
+            
+            # Wait for all tasks to complete
+            message_queue.join()
+            
+            # Wait for all threads to finish
+            for thread in threads:
+                thread.join()
+        else:
+            # Single-threaded execution
+            count = 0
+            parsed_conditions = self._parse_conditions()
+            
+            while count < self.total_messages:
+                should_match = self.true_count < self.target_true_count
+                
+                event_data = self.generate_event(should_match_condition=should_match)
+                
+                condition_met = self._evaluate_condition(event_data, parsed_conditions) if parsed_conditions else False
+                
+                if condition_met:
+                    self.true_count += 1
+                else:
+                    self.false_count += 1
+                
+                self.push_to_kafka(event_data)
+                count += 1
+                
+                # Periodic flush to avoid buffering
+                if count % self.flush_interval == 0:
+                    self.kafka_producer.flush()
         
         self.kafka_producer.flush()
         self.kafka_producer.close()
+        
+        self.end_time = time.time()
+        elapsed_time = self.end_time - self.start_time
+        messages_per_sec = self.total_messages / elapsed_time if elapsed_time > 0 else 0
         
         print("\n" + "="*50)
         print("EVENT GENERATION REPORT")
@@ -309,6 +435,9 @@ class EventsGenerator:
         print(f"Events with Condition FALSE: {self.false_count}")
         print(f"Target True Count: {self.target_true_count}")
         print(f"Actual Match Rate: {(self.true_count/self.total_messages)*100:.2f}%")
+        print(f"Time Taken: {elapsed_time:.2f} seconds")
+        print(f"Throughput: {messages_per_sec:.2f} messages/sec")
+        print(f"Threads Used: {self.num_threads}")
         print("="*50)
 
 
@@ -322,6 +451,7 @@ if __name__ == "__main__":
     parser.add_argument('--event-names', type=str, default=None, help='Comma-separated list of event names')
     parser.add_argument('--conditional-fields', type=str, default=None, help='JSON string of conditional fields')
     parser.add_argument('--properties', type=str, default=None, help='JSON string of event properties schema')
+    parser.add_argument('--num-threads', type=int, default=1, help='Number of threads for parallel generation')
     
     args = parser.parse_args()
     
@@ -354,6 +484,7 @@ if __name__ == "__main__":
         properties=properties_schema,
         total_messages=args.total_messages,
         target_true_count=args.target_true_count,
-        conditional_fields=conditional_fields
+        conditional_fields=conditional_fields,
+        num_threads=args.num_threads
     )
     generator.run()

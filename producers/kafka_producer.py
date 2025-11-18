@@ -22,7 +22,15 @@ class KafkaProducer:
                 value_serializer=lambda v: v if isinstance(v, bytes) else json.dumps(v).encode('utf-8'),
                 acks='all',
                 retries=3,
-                max_in_flight_requests_per_connection=1
+                max_in_flight_requests_per_connection=5,  # Increased for better throughput
+                request_timeout_ms=30000,  # 30 seconds
+                delivery_timeout_ms=40000,  # 40 seconds total
+                max_block_ms=10000,  # 10 seconds to wait for buffer space
+                api_version_auto_timeout_ms=5000,  # 5 seconds to detect broker version
+                linger_ms=0,  # Send immediately, don't wait to batch
+                batch_size=0,  # Disable batching for minimal latency
+                compression_type=None,  # No compression for faster sends
+                buffer_memory=33554432  # 32MB buffer (default, but explicit)
             )
             logger.info(f"Kafka Producer initialized with bootstrap_servers: {bootstrap_servers}")
         except Exception as e:
