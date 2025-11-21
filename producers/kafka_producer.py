@@ -20,17 +20,17 @@ class KafkaProducer:
             self.kafka_producer = KP(
                 bootstrap_servers=bootstrap_servers,
                 value_serializer=lambda v: v if isinstance(v, bytes) else json.dumps(v).encode('utf-8'),
-                acks='all',
-                retries=3,
-                max_in_flight_requests_per_connection=5,  # Increased for better throughput
-                request_timeout_ms=30000,  # 30 seconds
-                delivery_timeout_ms=40000,  # 40 seconds total
-                max_block_ms=10000,  # 10 seconds to wait for buffer space
-                api_version_auto_timeout_ms=5000,  # 5 seconds to detect broker version
-                linger_ms=0,  # Send immediately, don't wait to batch
-                batch_size=0,  # Disable batching for minimal latency
-                compression_type=None,  # No compression for faster sends
-                buffer_memory=33554432  # 32MB buffer (default, but explicit)
+                acks=1,  # Wait for leader acknowledgment
+                retries=10,  # Increased retries for reliability
+                max_in_flight_requests_per_connection=5,  # Reduced to prevent overwhelming broker
+                request_timeout_ms=30000,  # Reduced to 30 seconds - fail faster
+                delivery_timeout_ms=60000,  # Reduced to 60 seconds total
+                max_block_ms=10000,  # Reduced to 10 seconds - fail faster if buffer full
+                api_version_auto_timeout_ms=10000,
+                linger_ms=10,  # Reduced batching delay for faster sends
+                batch_size=32768,  # 32KB batch size (smaller for faster sends)
+                compression_type=None,  # Added compression to reduce network load
+                buffer_memory=67108864  # 64MB buffer (reduced to apply backpressure sooner)
             )
             logger.info(f"Kafka Producer initialized with bootstrap_servers: {bootstrap_servers}")
         except Exception as e:

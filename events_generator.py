@@ -5,9 +5,11 @@
 import json
 import logging
 import random
+import secrets
 from datetime import datetime, timedelta
 from faker import Faker
 from producers.kafka_producer import KafkaProducer
+from utils.config_loader import ConfigLoader
 import time
 import argparse
 from threading import Thread, Lock
@@ -25,56 +27,77 @@ DEFAULT_EVENT_FIELDS = {
     "bsin": "uuid",
     "event_id": "uuid",
     "event_type": "string",
-    "identified": "string",
-    "resource_id": "string",
-    "resource_type": "string",
+    "user_id": "string", "email": "email",
+    # "identified": "string",
+    # "resource_id": "string",
+    # "resource_type": "string",
     "dt": "datetime",
-    "url": "string",
-    "identity": {"bsin": "uuid", "user_id": "string", "email": "email"},
-    "metadata": {
-        "receive_id": "uuid",
-        "receive_hostname": "string",
-        "receive_timestamp": "iso_datetime",
-        "process_id": "uuid",
-        "process_hostname": "string",
-        "process_timestamp": "iso_datetime"
-    },
+    # "url": "url",
+    # "identity": {"bsin": "uuid", "user_id": "string", "email": "email"},
+    # "metadata": {
+    #     "receive_id": "uuid",
+    #     "receive_hostname": "string",
+    #     "receive_timestamp": "iso_datetime",
+    #     "process_id": "uuid",
+    #     "process_hostname": "string",
+    #     "process_timestamp": "iso_datetime"
+    # },
     "properties": {},
-    "property_format": "string",
-    "status": "string"
+    # "property_format": "string",
+    # "status": "string"
 }
 
-DEFAULT_EVENT_NAMES = ["purchase", "viewed", "clicked", "added_to_cart", "abandoned_cart"]
+DEFAULT_EVENT_NAMES = [
+    "purchase","purchased", "viewed", "clicked", "add_to_cart", "abandoned_cart", "nudgespot::exhibited_behavior", 
+    "system::experience_entered", "system::experience_exited",
+    "system::experience_skipped"
+    ]
 
 DEFAULT_EVENT_PROPERTIES = {
     "purchase": {
         "cart_total": "int",
         "departure_time": "datetime",
-        "nudge_token": "string",
+        "nudge_token": "token",
         "timestamp": "iso_datetime",
         "value": "int"
     },
     "viewed": {
-        "nudge_token": "string",
+        "url": "url",
         "timestamp": "iso_datetime",
         "resource_type": "string"
     },
     "clicked": {
-        "nudge_token": "string",
+        "nudge_token": "token",
         "timestamp": "iso_datetime",
-        "url": "string"
+        "url": "url"
     },
     "added_to_cart": {
         "cart_total": "int",
-        "nudge_token": "string",
+        "nudge_token": "token",
         "timestamp": "iso_datetime"
     },
     "abandoned_cart": {
         "cart_total": "int",
         "departure_time": "datetime",
-        "nudge_token": "string",
+        "nudge_token": "uuid",
         "timestamp": "iso_datetime"
-    }
+        },
+        "nudgespot::exhibited_behavior": {
+            "behavior_token": "token",
+            "timestamp": "iso_datetime"
+        },
+        "system::experience_entered": {
+            "experience_token": "token",
+            "timestamp": "iso_datetime"
+        },
+        "system::experience_exited": {
+            "experience_token": "token",
+            "timestamp": "iso_datetime"
+        },
+        "system::experience_skipped": {
+            "experience_token": "token",
+            "timestamp": "iso_datetime"
+        }
 }
 
 
@@ -98,7 +121,35 @@ class EventsGenerator:
         self.count_lock = Lock()
         self.start_time = None
         self.end_time = None
-        self.flush_interval = kwargs.get("flush_interval", 1000)  # Flush every N messages
+        self.flush_interval = kwargs.get("flush_interval", 100)  # Flush every N messages (reduced for better reliability)
+        
+        # Load BSINs from file if provided
+        self.bsins = []
+        self.bsin_index = 0
+        bsin_file = kwargs.get("bsin_file", None)
+        if bsin_file:
+            self._load_bsins(bsin_file)
+    
+    def _load_bsins(self, file_path: str):
+        """Load BSINs from a file"""
+        try:
+            with open(file_path, 'r') as f:
+                self.bsins = [line.strip() for line in f if line.strip()]
+            self.bsin_length = len(self.bsins)
+            logger.info(f"Loaded {len(self.bsins)} BSINs from {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to load BSINs from {file_path}: {e}")
+            raise
+    
+    def _get_next_bsin(self):
+        """Get the next BSIN from the loaded list (cycles through if needed)"""
+        if not self.bsins:
+            return self.faker.uuid4()
+        
+        with self.count_lock:
+            bsin = self.bsins[self.bsin_index % self.bsin_length]
+            self.bsin_index += 1
+        return bsin
 
     def _parse_conditions(self):
         """Parse conditional fields to extract field requirements"""
@@ -146,15 +197,27 @@ class EventsGenerator:
             elif field_name.endswith("hostname"):
                 return self.faker.hostname()
             return self.faker.word()
+        elif data_type == "url":
+            return self.faker.url()
+        elif data_type == "token":
+            return secrets.token_hex(16)
         elif data_type == "uuid":
+            # Use BSINs from file if available and field is "bsin"
+            if field_name == "bsin" and self.bsins:
+                return self._get_next_bsin()
             return self.faker.uuid4()
         elif data_type == "email":
             return self.faker.email()
         elif data_type == "datetime":
-            return self.faker.date_time_between(start_date='-30d', end_date='now').strftime('%Y-%m-%d %H:%M:%S')
+            if field_name == "departure_time":
+                return self.faker.date_time_between(start_date='now', end_date='+10d').strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                return self.faker.date_time_between(start_date='-30d', end_date='now').strftime('%Y-%m-%d %H:%M:%S')
         elif data_type == "iso_datetime":
             return self.faker.date_time_between(start_date='-30d', end_date='now').strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + '+00:00'
         elif data_type == "int":
+            if field_name == "cart_total":
+                return random.randint(1500, 10000)
             return random.randint(100, 10000)
         elif data_type == "bool_str":
             return str(random.choice([True, False])).lower()
@@ -324,8 +387,8 @@ class EventsGenerator:
 
     def push_to_kafka(self, event_data: dict):
         try:
-            print(event_data)
-            # self.kafka_producer.send(self.kafka_topic, json.dumps(event_data).encode('utf-8'))
+            # print(event_data)
+            self.kafka_producer.send(self.kafka_topic, json.dumps(event_data).encode('utf-8'))
         except Exception as e:
             logger.error(f"Failed to send message to Kafka: {e}")
             raise
@@ -356,6 +419,7 @@ class EventsGenerator:
                     self.false_count += 1
             
             # Push to Kafka
+            # print(event_data)
             self.push_to_kafka(event_data)
             
             local_count += 1
@@ -442,18 +506,34 @@ class EventsGenerator:
 
 
 if __name__ == "__main__":
+    # Load configuration
+    config = ConfigLoader.load()
+    
     parser = argparse.ArgumentParser(description='Generate events with conditional fields')
-    parser.add_argument('--total-messages', type=int, default=100, help='Total number of events to generate')
-    parser.add_argument('--target-true-count', type=int, default=50, help='Target number of events where condition is true')
-    parser.add_argument('--kafka-broker', type=str, default='localhost:19092', help='Kafka broker address')
-    parser.add_argument('--kafka-topic', type=str, default='user_events', help='Kafka topic name')
-    parser.add_argument('--site', type=str, default='boomtrain', help='Site ID for events')
+    parser.add_argument('--total-messages', type=int, default=5000000, help='Total number of events to generate')
+    parser.add_argument('--target-true-count', type=int, default=5000000, help='Target number of events where condition is true')
+    parser.add_argument('--kafka-broker', type=str, default=None, help='Kafka broker address (overrides config file)')
+    parser.add_argument('--kafka-topic', type=str, default=None, help='Kafka topic name (overrides config file)')
+    parser.add_argument('--site', type=str, default=None, help='Site ID for events (overrides config file)')
     parser.add_argument('--event-names', type=str, default=None, help='Comma-separated list of event names')
     parser.add_argument('--conditional-fields', type=str, default=None, help='JSON string of conditional fields')
     parser.add_argument('--properties', type=str, default=None, help='JSON string of event properties schema')
-    parser.add_argument('--num-threads', type=int, default=1, help='Number of threads for parallel generation')
+    parser.add_argument('--num-threads', type=int, default=None, help='Number of threads for parallel generation (overrides config file)')
+    parser.add_argument('--bsin-file', type=str, default=None, help='Path to file containing BSINs (overrides config file)')
+    parser.add_argument('--config', type=str, default=None, help='Path to config file (default: config.json)')
     
     args = parser.parse_args()
+    
+    # Reload config if custom config file specified
+    if args.config:
+        config = ConfigLoader.load(args.config)
+    
+    # Get configuration values with command-line overrides
+    kafka_broker = args.kafka_broker or ConfigLoader.get_kafka_brokers()
+    kafka_topic = args.kafka_topic or ConfigLoader.get_kafka_topic("events")
+    site = args.site or ConfigLoader.get_default("site_id", "boomtrain")
+    num_threads = args.num_threads or ConfigLoader.get_default("num_threads", 5)
+    bsin_file = args.bsin_file or ConfigLoader.get_bsin_file()
     
     # Parse event names if provided
     event_names = DEFAULT_EVENT_NAMES
@@ -476,15 +556,22 @@ if __name__ == "__main__":
         except json.JSONDecodeError:
             logger.error("Invalid JSON for properties, using default")
     
+    logger.info(f"Using Kafka Broker: {kafka_broker}")
+    logger.info(f"Using Kafka Topic: {kafka_topic}")
+    logger.info(f"Using Site ID: {site}")
+    logger.info(f"Using {num_threads} threads")
+    logger.info(f"Using BSIN file: {bsin_file}")
+    
     generator = EventsGenerator(
-        kafka_broker=args.kafka_broker,
-        kafka_topic=args.kafka_topic,
-        site=args.site,
+        kafka_broker=kafka_broker,
+        kafka_topic=kafka_topic,
+        site=site,
         event_names=event_names,
         properties=properties_schema,
         total_messages=args.total_messages,
         target_true_count=args.target_true_count,
         conditional_fields=conditional_fields,
-        num_threads=args.num_threads
+        num_threads=num_threads,
+        bsin_file=bsin_file
     )
     generator.run()

@@ -11,6 +11,7 @@ import random
 from datetime import datetime, timedelta
 from faker import Faker
 from producers.kafka_producer import KafkaProducer
+from utils.config_loader import ConfigLoader
 import time
 import argparse
 from threading import Thread, Lock
@@ -22,14 +23,22 @@ logger = logging.getLogger(__name__)
 
 # Custom struct generators registry
 # Add more custom structures here as needed
+SHOPPING_ITEMS = [
+    "phone", "laptop", "tablet", "headphones", "smartwatch", "camera", "speaker",
+    # "keyboard", "mouse", "monitor", "charger", "case", "backpack", "shoes",
+    # "jacket", "jeans", "shirt", "dress", "sunglasses", "wallet", "bag",
+    # "book", "notebook", "pen", "perfume", "watch", "jewelry", "makeup"
+]
+
 CUSTOM_STRUCT_GENERATORS = {
     "purchase": lambda faker: {
         "datafields": {
             "total": random.randint(100, 5000),
             "items": [
                 {
-                    "item_id": random.randint(1, 1000),
-                    "item_name": faker.word()
+                    "item_id": random.randint(1, 100),
+                    "item_name": random.choice(SHOPPING_ITEMS),
+                    "item_price": random.randint(100, 1000),
                 }
                 for _ in range(random.randint(1, 5))  # Generate 1-5 items
             ]
@@ -86,7 +95,35 @@ class UserPropsGenerator:
         self.count_lock = Lock()
         self.start_time = None
         self.end_time = None
-        self.flush_interval = kwargs.get("flush_interval", 1000)  # Flush every N messages
+        self.flush_interval = kwargs.get("flush_interval", 100)  # Flush every N messages
+        
+        # Load BSINs from file if provided
+        self.bsins = []
+        self.bsin_index = 0
+        bsin_file = kwargs.get("bsin_file", None)
+        if bsin_file:
+            self._load_bsins(bsin_file)
+    
+    def _load_bsins(self, file_path: str):
+        """Load BSINs from a file"""
+        try:
+            with open(file_path, 'r') as f:
+                self.bsins = [line.strip() for line in f if line.strip()]
+            self.bsin_length = len(self.bsins)
+            logger.info(f"Loaded {len(self.bsins)} BSINs from {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to load BSINs from {file_path}: {e}")
+            raise
+    
+    def _get_next_bsin(self):
+        """Get the next BSIN from the loaded list (cycles through if needed)"""
+        if not self.bsins:
+            return self.faker.uuid4()
+        
+        with self.count_lock:
+            bsin = self.bsins[self.bsin_index % self.bsin_length]
+            self.bsin_index += 1
+        return bsin
 
     def _parse_conditions(self):
         """Parse conditional fields to extract field requirements"""
@@ -145,6 +182,9 @@ class UserPropsGenerator:
                 return self.faker.zipcode()
             return self.faker.word()
         elif data_type == "uuid":
+            # Use BSINs from file if available and field is "bsin"
+            if field_name == "bsin" and self.bsins:
+                return self._get_next_bsin()
             return self.faker.uuid4()
         elif data_type == "email":
             return self.faker.email()
@@ -185,7 +225,8 @@ class UserPropsGenerator:
                 }
             }
         else:
-            return ""
+            # Fixed value case
+            return data_type
 
     def _evaluate_condition(self, user_props, condition):
         """Evaluate if a condition is true for the given user properties"""
@@ -415,15 +456,30 @@ class UserPropsGenerator:
 
 
 if __name__ == "__main__":
+    # Load configuration
+    config = ConfigLoader.load()
+    
     parser = argparse.ArgumentParser(description='Generate user properties with conditional fields')
-    parser.add_argument('--total-messages', type=int, default=100000000, help='Total number of messages to generate')
-    parser.add_argument('--target-true-count', type=int, default=100000000, help='Target number of messages where condition is true')
-    parser.add_argument('--kafka-broker', type=str, default="b-1.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092,b-2.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092,b-3.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092", help='Kafka broker address')
-    parser.add_argument('--kafka-topic', type=str, default='seg_poc_identity', help='Kafka topic name')
+    parser.add_argument('--total-messages', type=int, default=50000000, help='Total number of messages to generate')
+    parser.add_argument('--target-true-count', type=int, default=50000000, help='Target number of messages where condition is true')
+    parser.add_argument('--kafka-broker', type=str, default=None, help='Kafka broker address (overrides config file)')
+    parser.add_argument('--kafka-topic', type=str, default=None, help='Kafka topic name (overrides config file)')
     parser.add_argument('--conditional-fields', type=str, default=None, help='JSON string of conditional fields')
-    parser.add_argument('--num-threads', type=int, default=15, help='Number of threads for parallel generation')
+    parser.add_argument('--num-threads', type=int, default=None, help='Number of threads for parallel generation (overrides config file)')
+    parser.add_argument('--bsin-file', type=str, default=None, help='Path to file containing BSINs (overrides config file)')
+    parser.add_argument('--config', type=str, default=None, help='Path to config file (default: config.json)')
     
     args = parser.parse_args()
+    
+    # Reload config if custom config file specified
+    if args.config:
+        config = ConfigLoader.load(args.config)
+    
+    # Get configuration values with command-line overrides
+    kafka_broker = args.kafka_broker or ConfigLoader.get_kafka_brokers()
+    kafka_topic = args.kafka_topic or ConfigLoader.get_kafka_topic("identity")
+    num_threads = args.num_threads or ConfigLoader.get_default("num_threads", 5)
+    bsin_file = args.bsin_file or ConfigLoader.get_bsin_file()
     
     # Parse conditional fields if provided
     conditional_fields = CONDITIONAL_FIELDS
@@ -433,12 +489,18 @@ if __name__ == "__main__":
         except json.JSONDecodeError:
             logger.error("Invalid JSON for conditional_fields, using default")
     
+    logger.info(f"Using Kafka Broker: {kafka_broker}")
+    logger.info(f"Using Kafka Topic: {kafka_topic}")
+    logger.info(f"Using {num_threads} threads")
+    logger.info(f"Using BSIN file: {bsin_file}")
+    
     generator = UserPropsGenerator(
-        kafka_broker=args.kafka_broker,
-        kafka_topic=args.kafka_topic,
+        kafka_broker=kafka_broker,
+        kafka_topic=kafka_topic,
         total_messages=args.total_messages,
         target_true_count=args.target_true_count,
         conditional_fields=conditional_fields,
-        num_threads=args.num_threads
+        num_threads=num_threads,
+        bsin_file=bsin_file
     )
     generator.run()

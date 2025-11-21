@@ -1,0 +1,22 @@
+{
+  "kafka": {
+    "brokers": "b-1.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092,b-2.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092,b-3.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092",
+    "topics": {
+      "events": "seg_poc_events",
+      "identity": "seg_poc_identity"
+    }
+  },
+  "feldera": {
+    "api_url": "https://feldera.app.zmp-preprod-use1.zetaglobal.io/",
+    "pipeline_name": "test_list",
+    "api_key": ""
+  },
+  "data": {
+    "bsin_file": "data/bsins_extracted.txt"
+  },
+  "defaults": {
+    "site_id": "boomtrain",
+    "num_threads": 5,
+    "flush_interval": 500
+  }
+}
