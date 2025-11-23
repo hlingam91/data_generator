@@ -1164,7 +1164,9 @@ class FelderaPipelineLagCalculator:
             Dictionary mapping topic -> {partition: offset}
         """
         logger.info("Extracting Feldera consumed offsets from stats...")
-        feldera_offsets = {}
+        feldera_offsets = {"seg_poc_identity":{},
+                           "seg_poc_events": {}
+                           }
 
         try:
             # feldera offsets are in the "inputs": ["endpoint_name": "user_props_input.user_props",] -- "completed_frontier": {                 "metadata": {                     "offsets": [
@@ -1190,6 +1192,7 @@ class FelderaPipelineLagCalculator:
             logger.info(f"Extracted offsets for {len(feldera_offsets)} topics from Feldera")
             return feldera_offsets    
         except Exception as e:
+            print(f"Error extracting Feldera offsets: {e}")
             logger.error(f"Error extracting Feldera offsets: {e}")
             logger.debug(f"Stats structure: {json.dumps(stats, indent=2)}")
             return {}

@@ -33,7 +33,7 @@ SHOPPING_ITEMS = [
 CUSTOM_STRUCT_GENERATORS = {
     "purchase": lambda faker: {
         "datafields": {
-            "total": random.randint(100, 5000),
+            "total": random.randint(10, 2000),
             "items": [
                 {
                     "item_id": random.randint(1, 100),
@@ -69,9 +69,9 @@ DEFAULT_MESSAGE_FIELDS = {
   }
   #   "replaced_by", "email_md5", "sub_site_ids", "scoped_properties", "scoped_contacts", "imported_from", "consent", "external_ids", "unique_client_ids"}
 
-properties = {"has_active_email": "bool_str",
-              "all_emails": "bool_str",
-              "double_optin": "bool_str",
+properties = {"has_active_email": "bool",
+              "all_emails": "bool",
+              "double_optin": "bool",
               "signed_up_at": "datetime",
               "appointment_time": "datetime",
               "last_purchase": "custom_struct:purchase"}
@@ -189,9 +189,11 @@ class UserPropsGenerator:
         elif data_type == "email":
             return self.faker.email()
         elif data_type == "datetime":
-            return self.faker.date_time_between(start_date='-30d', end_date='-30d').strftime('%Y-%m-%d %H:%M:%S')
+            return self.faker.date_time_between(start_date='-120d', end_date='+120d').strftime('%Y-%m-%d %H:%M:%S')
         elif data_type == "bool_str":
             return str(random.choice([True, False])).lower()
+        elif data_type == "bool":
+            return random.choice([True, False])
         elif data_type.startswith("map<int>"):
             return {"total": random.randint(100, 10000)}
         elif data_type.startswith("map<Contact>"):
