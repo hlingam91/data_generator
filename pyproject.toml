@@ -7,4 +7,5 @@ dependencies = [
     "kafka-python>=2.0.2",
     "faker>=20.0.0",
     "requests>=2.31.0",
+    "lz4>=4.4.5",
 ]

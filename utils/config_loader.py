@@ -109,3 +109,4 @@ class ConfigLoader:
         """
         return cls.get(f"defaults.{key}", fallback)
 
+
