@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from faker import Faker
 from producers.kafka_producer import KafkaProducer
 from utils.config_loader import ConfigLoader
+from utils.generator_util import generate_value
 import time
 import argparse
 from threading import Thread, Lock
@@ -21,41 +22,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Custom struct generators registry
-# Add more custom structures here as needed
-SHOPPING_ITEMS = [
-    "phone", "laptop", "tablet", "headphones", "smartwatch", "camera", "speaker",
-    # "keyboard", "mouse", "monitor", "charger", "case", "backpack", "shoes",
-    # "jacket", "jeans", "shirt", "dress", "sunglasses", "wallet", "bag",
-    # "book", "notebook", "pen", "perfume", "watch", "jewelry", "makeup"
-]
-
-CUSTOM_STRUCT_GENERATORS = {
-    "purchase": lambda faker: {
-        "datafields": {
-            "total": random.randint(10, 2000),
-            "items": [
-                {
-                    "item_id": random.randint(1, 100),
-                    "item_name": random.choice(SHOPPING_ITEMS),
-                    "item_price": random.randint(100, 1000),
-                }
-                for _ in range(random.randint(1, 5))  # Generate 1-5 items
-            ]
-        }
-    },
-    "shopping_cart": lambda faker: {
-        "total": random.randint(100, 10000)
-    }
-    # Example of another custom structure for future use
-    # "order": lambda faker: {
-    #     "datafields": {
-    #         "order_id": faker.uuid4(),
-    #         "status": random.choice(["pending", "completed", "cancelled"]),
-    #         "metadata": {"source": "web", "device": "mobile"}
-    #     }
-    # }
-}
 
 MESSAGE_COUNT = 1
 CONDITIONAL_FIELDS = []
@@ -542,85 +508,7 @@ class UserPropsGenerator:
 
     def _generate_value(self, field_name: str, data_type: str, condition_value=None):
         """Generate mock value based on data type"""
-        # If a specific condition value is provided, use it
-        if condition_value is not None:
-            return condition_value
-        
-        # Handle custom struct types
-        if data_type.startswith("custom_struct:"):
-            struct_type = data_type.split(":", 1)[1]
-            generator_func = CUSTOM_STRUCT_GENERATORS.get(struct_type)
-            if generator_func:
-                return generator_func(self.faker)
-            else:
-                logger.warning(f"Unknown custom_struct type: {struct_type}")
-                return {}
-        
-        if data_type == "string":
-            if field_name.lower().endswith("email"):
-                return self.faker.email()
-            elif field_name.lower().endswith("company"):
-                return self.faker.company()
-            elif field_name.lower().endswith("country"):
-                return self.faker.country()
-            elif field_name.lower().endswith("city"):
-                return self.faker.city()
-            elif field_name.lower().endswith("state"):
-                return self.faker.state()
-            elif field_name.lower() == "zip":
-                return self.faker.zipcode()
-            elif field_name.lower().endswith("campaign_name"):
-                return random.choice(["Campaign 1", "Campaign 2", "Campaign 3", "Campaign 4", "Campaign 5"]) + " " + self.faker.word()
-            elif field_name.lower() == "uid":
-                return self.faker.uuid4() + random.choice(["@icloud.com", "@mac.com", "@gmail.com", "@yahoo.com", "@hotmail.com"])
-        elif data_type == "uuid":
-            # Use BSINs from file if available and field is "bsin"
-            if field_name == "bsin" and self.bsins:
-                return self._get_next_bsin()
-            return self.faker.uuid4()
-        elif data_type == "email":
-            return self.faker.email()
-        elif data_type == "datetime":
-            return self.faker.date_time_between(start_date='-150d', end_date='+150d').strftime('%Y-%m-%d %H:%M:%S')
-        elif data_type == "bool_str":
-            return str(random.choice([True, False])).lower()
-        elif data_type == "bool":
-            return random.choice([True, False])
-        elif data_type.startswith("map<int>"):
-            return {"total": random.randint(100, 10000)}
-        elif data_type.startswith("map<Contact>"):
-            # Generate a contact map with email as key
-            email = self.faker.email()
-            time = self.faker.date_time_between(start_date='-30d', end_date='-30d').strftime('%Y-%m-%d %H:%M:%S')
-            return {
-                
-                f"email::{email}": {
-                    "type": "email",
-                    "value": email,
-                    "status": random.choice(["active", "inactive"]),
-                    "preferences": ["standard"],
-                    "inactivity_reason": random.choice(["unsubscribed", None]),
-                    "created_at": time,
-                    "updated_at": time,
-                    # "last_inactivity_updated_at": self.faker.unix_time(),
-                    # "last_clicked": None,
-                    # "last_opened": None,
-                    # "last_sent": self.faker.unix_time(),
-                    # "last_purchased": None,
-                    # "domain": email.split('@')[1],
-                    # "signed_up_at": self.faker.unix_time(),
-                    # "double_opt_in_status": None,
-                    # "country_code": None,
-                    # "area_code": None,
-                    # "timezone": None,
-                    # "geolocation": None,
-                    # "phone_type": None,
-                    # "contact_properties": None
-                }
-            }
-        else:
-            # Fixed value case
-            return data_type
+        return generate_value(self.faker, field_name, data_type, self._get_next_bsin, condition_value)
 
     def _evaluate_condition(self, user_props, condition):
         """Evaluate if a condition is true for the given user properties"""
