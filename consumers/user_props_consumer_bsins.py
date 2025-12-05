@@ -16,9 +16,12 @@ from kafka import KafkaConsumer
 import signal
 import sys
 
+# Add project root to path for imports
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from utils.config_loader import ConfigLoader
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-BOOTSTRAP_SERVERS = "b-1.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092,b-2.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092,b-3.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092"
 
 class UserPropsConsumer:
     """Consumer to extract unique BSINs from user properties messages"""
@@ -211,9 +214,13 @@ class UserPropsConsumer:
 
 
 if __name__ == "__main__":
+    # Load configuration
+    ConfigLoader.load()
+    default_brokers = ConfigLoader.get_kafka_brokers()
+
     parser = argparse.ArgumentParser(description='Consume user properties and extract unique BSINs')
-    parser.add_argument('--bootstrap-servers', type=str, default=BOOTSTRAP_SERVERS, 
-                        help='Kafka bootstrap servers')
+    parser.add_argument('--bootstrap-servers', type=str, default=default_brokers, 
+                        help=f'Kafka bootstrap servers (default: {default_brokers})')
     parser.add_argument('--topic', type=str, default='seg_poc_identity', 
                         help='Kafka topic to consume from (default: seg_poc_identity)')
     parser.add_argument('--group-id', type=str, default='user_props_consumer_group', 

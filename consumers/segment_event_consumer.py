@@ -13,10 +13,14 @@ from collections import defaultdict
 from kafka import KafkaConsumer
 import signal
 import sys
+import os
+
+# Add project root to path for imports
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from utils.config_loader import ConfigLoader
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-BOOTSTRAP_SERVERS = "b-1.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092,b-2.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092,b-3.preprod-msk-zme.95l1o5.c3.kafka.us-east-1.amazonaws.com:9092"
 
 class SegmentEventConsumer:
     """Consumer to track insert/delete operations per view_name"""
@@ -176,9 +180,13 @@ class SegmentEventConsumer:
 
 
 if __name__ == "__main__":
+    # Load configuration
+    ConfigLoader.load()
+    default_brokers = ConfigLoader.get_kafka_brokers()
+
     parser = argparse.ArgumentParser(description='Consume segment events and track counts per view_name')
-    parser.add_argument('--bootstrap-servers', type=str, default=BOOTSTRAP_SERVERS, 
-                        help='Kafka bootstrap servers (default: localhost:9092)')
+    parser.add_argument('--bootstrap-servers', type=str, default=default_brokers, 
+                        help=f'Kafka bootstrap servers (default: {default_brokers})')
     parser.add_argument('--topic', type=str, default='seg_poc_segment_events', 
                         help='Kafka topic to consume from (default: segment)')
     parser.add_argument('--group-id', type=str, default='segment_consumer_group1',

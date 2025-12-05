@@ -134,5 +134,35 @@ Actual Match Rate: 70.00%
 - Messages are sent to Kafka with a 0.1s delay between sends
 - All generated data is synthetic using the Faker library
 
+## Delta Updates Generator (user_props_generator_narrow_delta.py)
 
+This script is designed to generate "delta" updates for existing user records. It reads user records from a file (e.g., produced by `user_props_consumer_full.py`), updates a RANDOM set of fields for each record, and pushes the updated records to Kafka.
 
+### Key Features
+✅ **Delta Generation**: Reads existing records and updates only a subset of fields.
+✅ **Random Field Selection**: For each record, randomly selects N fields to update from the schema (including nested fields like `last_purchase.datafields.total`).
+✅ **Configurable Count**: Choose how many fields to update per record.
+✅ **High Throughput**: Supports multi-threaded generation.
+✅ **Simple Random Updates**: No complex conditional logic—just random changes to simulate activity.
+
+### Usage
+
+```bash
+python3 user_props_generator_narrow_delta.py \
+  --users-file data/users_extracted.txt \
+  --num-fields 2 \
+  --total-messages 10000
+```
+
+### Arguments
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--users-file` | str | data/users_extracted.txt | Path to input file containing JSON user records |
+| `--num-fields` | int | 2 | Number of fields to randomly update per record |
+| `--total-messages` | int | 50000000 | Total number of update messages to generate |
+| `--num-threads` | int | 5 | Number of threads for parallel generation |
+
+### Workflow
+1. **Consume**: Run `consumers/user_props_consumer_full.py` to extract unique user records to `data/users_extracted.txt`.
+2. **Generate Delta**: Run `user_props_generator_narrow_delta.py` to read those records, randomly pick N fields (e.g., `properties.has_active_email`, `properties.last_purchase.datafields.total`) to update, and push back to Kafka.

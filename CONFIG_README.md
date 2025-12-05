@@ -20,7 +20,8 @@ The default configuration file is `config.json` in the project root directory.
     }
   },
   "data": {
-    "bsin_file": "data/bsins_extracted.txt"
+    "bsin_file": "data/bsins_extracted.txt",
+    "users_file": "data/users_extracted.txt"
   },
   "defaults": {
     "site_id": "boomtrain",
@@ -40,6 +41,7 @@ The default configuration file is `config.json` in the project root directory.
 
 ### data
 - **bsin_file**: Path to file containing BSINs (one per line)
+- **users_file**: Path to file containing full user records (one JSON per line)
 
 ### defaults
 - **site_id**: Default site identifier
