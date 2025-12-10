@@ -1,13 +1,25 @@
 """
-Feldera Pipeline Lag Calculator
+Feldera Pipeline Metrics Calculator
 
-This script fetches Feldera pipeline metrics and calculates the lag 
-between Kafka's latest offset and Feldera's consumed offset.
+This script fetches Feldera pipeline metrics to:
+1. Calculate total transmitted records across all outputs
+2. Calculate lag between Kafka's latest offset and Feldera's consumed offset
+
+Output format parsing focuses on:
+ "outputs": [
+        {
+            "endpoint_name": "...",
+            "metrics": {
+                "transmitted_records": 21978800,
+                ...
+            }
+        }
+    ]
 
 Features:
-- Fetches pipeline stats from Feldera API
-- Gets latest Kafka offsets for all topic partitions
-- Calculates and displays lag metrics
+- parses pipeline stats from Feldera API
+- Counts total transmitted records from all output endpoints
+- Gets latest Kafka offsets and calculates lag
 - Supports both config file and command-line arguments
 """
 
@@ -34,8 +46,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class FelderaPipelineLagCalculator:
-    """Calculate lag between Kafka and Feldera pipeline"""
+class FelderaPipelineMetricsCalculator:
+    """Calculate metrics including output records and lag for Feldera pipeline"""
     
     def __init__(
         self,
@@ -126,7 +138,7 @@ class FelderaPipelineLagCalculator:
         logger.info(f"Fetching Feldera pipeline stats for: {self.pipeline_name}")
         
         url = f"{self.feldera_api_url}/v0/pipelines/{self.pipeline_name}/stats"
-         
+       
         headers = {}
         if self.api_key:
             headers['Authorization'] = f"Bearer {self.api_key}"
@@ -187,6 +199,28 @@ class FelderaPipelineLagCalculator:
             logger.debug(f"Stats structure: {json.dumps(stats, indent=2)}")
             return {}
     
+    def calculate_total_transmitted_records(self, stats: Dict) -> int:
+        """
+        Calculate total transmitted records from all output endpoints
+        
+        Args:
+            stats: Feldera pipeline stats dictionary
+            
+        Returns:
+            Total transmitted records count
+        """
+        logger.info("Calculating total transmitted records...")
+        total_records = 0
+        
+        if 'outputs' in stats:
+            for output in stats['outputs']:
+                metrics = output.get('metrics', {})
+                records = metrics.get('transmitted_records', 0)
+                total_records += records
+                
+        logger.info(f"Total transmitted records: {total_records}")
+        return total_records
+
     def calculate_lag(
         self,
         kafka_offsets: Dict[str, Dict[int, int]],
@@ -226,7 +260,8 @@ class FelderaPipelineLagCalculator:
         kafka_offsets: Dict[str, Dict[int, int]],
         feldera_offsets: Dict[str, Dict[int, int]],
         lag: Dict[str, Dict[int, int]],
-        pipeline_stats: Dict
+        pipeline_stats: Dict,
+        total_transmitted_records: int = 0
     ):
         """
         Print comprehensive lag report
@@ -236,14 +271,19 @@ class FelderaPipelineLagCalculator:
             feldera_offsets: Feldera consumed offsets
             lag: Calculated lag
             pipeline_stats: Full pipeline stats from Feldera
+            total_transmitted_records: Total records transmitted by pipeline outputs
         """
         print("\n" + "=" * 80)
-        print(f"FELDERA PIPELINE LAG REPORT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"FELDERA PIPELINE METRICS REPORT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 80)
         print(f"Pipeline: {self.pipeline_name}")
         print(f"Kafka Brokers: {self.kafka_brokers}")
         print(f"Feldera API: {self.feldera_api_url}")
         print("-" * 80)
+        
+        # Output Metrics
+        print(f"\nOUTPUT METRICS:")
+        print(f"  Total Transmitted Records: {total_transmitted_records:,}")
         
         # Pipeline status
         if 'status' in pipeline_stats:
@@ -323,26 +363,30 @@ class FelderaPipelineLagCalculator:
     def run(self):
         """Execute the lag calculation and print report"""
         try:
-            # Fetch Kafka offsets
-            kafka_offsets = self.get_kafka_latest_offsets()
+            # # Fetch Kafka offsets
+            # kafka_offsets = self.get_kafka_latest_offsets()
             
             # Fetch Feldera pipeline stats
             pipeline_stats = self.get_feldera_pipeline_stats()
             
-            # Extract Feldera offsets from stats
-            feldera_offsets = self.extract_feldera_offsets(pipeline_stats)
+            # # Extract Feldera offsets from stats
+            # feldera_offsets = self.extract_feldera_offsets(pipeline_stats)
             
-            # Calculate lag
-            lag = self.calculate_lag(kafka_offsets, feldera_offsets)
+            # # Calculate lag
+            # lag = self.calculate_lag(kafka_offsets, feldera_offsets)
+            
+            # Calculate total transmitted records
+            total_transmitted = self.calculate_total_transmitted_records(pipeline_stats)
             
             # Print comprehensive report
-            self.print_report(kafka_offsets, feldera_offsets, lag, pipeline_stats)
+            # self.print_report(kafka_offsets, feldera_offsets, lag, pipeline_stats, total_transmitted)
             
             return {
-                'kafka_offsets': kafka_offsets,
-                'feldera_offsets': feldera_offsets,
-                'lag': lag,
-                'pipeline_stats': pipeline_stats
+                # 'kafka_offsets': kafka_offsets,
+                # 'feldera_offsets': feldera_offsets,
+                # 'lag': lag,
+                # 'pipeline_stats': pipeline_stats,
+                'total_transmitted_records': total_transmitted
             }
             
         except Exception as e:
@@ -454,7 +498,7 @@ Examples:
         sys.exit(1)
     
     # Create calculator and run
-    calculator = FelderaPipelineLagCalculator(
+    calculator = FelderaPipelineMetricsCalculator(
         kafka_brokers=kafka_brokers,
         feldera_api_url=feldera_url,
         pipeline_name=pipeline_name,

@@ -80,16 +80,12 @@ class UserPropsConsumer:
         self.running = False
     
     def _initialize_output_file(self):
-        """Initialize/clear the output file at the start"""
+        """Initialize the output file directory"""
         try:
             # Ensure data directory exists
             os.makedirs(os.path.dirname(self.output_file), exist_ok=True)
             
-            # Create empty file (clear if exists)
-            with open(self.output_file, 'w') as f:
-                pass
-            
-            logger.info(f"Initialized output file: {self.output_file}")
+            logger.info(f"Output file ready (append mode): {self.output_file}")
         except Exception as e:
             logger.error(f"Failed to initialize output file: {e}")
             raise

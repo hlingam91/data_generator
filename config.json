@@ -1,24 +1,25 @@
 {
-    "kafka": {
-      "brokers": "localhost:9092",
-      "topics": {
-        "events": "seg_poc_events",
-        "identity": "seg_poc_identity"
-      }
-    },
-    "feldera": {
-      "api_url": "https://your-feldera-host.com",
-      "pipeline_name": "your_pipeline_name",
-      "api_key": ""
-    },
-    "data": {
-      "bsin_file": "data/bsins_extracted.txt"
-    },
-    "defaults": {
-      "site_id": "boomtrain",
-      "num_threads": 5,
-      "flush_interval": 100
+  "kafka": {
+    "brokers": "localhost:9092",
+    "topics": {
+      "events": "seg_poc_events",
+      "identity": "seg_poc_identity",
+       "identity_delta": "seg_poc_identity_delta"
     }
+  },
+  "feldera": {
+    "api_url": "https://your-feldera-host.com",
+    "pipeline_name": "your_pipeline_name",
+    "api_key": ""
+  },
+  "data": {
+    "bsin_file": "data/bsins_extracted.txt",
+    "users_file": ""
+  },
+  "defaults": {
+    "site_id": "boomtrain",
+    "num_threads": 5,
+    "flush_interval": 100
   }
-  
-  
+}
+

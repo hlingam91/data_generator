@@ -9,29 +9,37 @@ logger = logging.getLogger(__name__)
 class KafkaProducer:
     """Class to handle producing messages to Kafka topic asynchronously"""
     
-    def __init__(self, bootstrap_servers="localhost:9092"):
+    def __init__(self, bootstrap_servers="localhost:9092", **kwargs):
         """
         Initialize Kafka Producer
         
         Args:
             bootstrap_servers: Comma-separated list of Kafka broker addresses
+            **kwargs: Additional Kafka producer configuration arguments
         """
         try:
-            self.kafka_producer = KP(
-                bootstrap_servers=bootstrap_servers,
-                value_serializer=lambda v: v if isinstance(v, bytes) else json.dumps(v).encode('utf-8'),
-                acks=1,  # Wait for leader acknowledgment
-                retries=10,  # Increased retries for reliability
-                max_in_flight_requests_per_connection=5,  # Reduced to prevent overwhelming broker
-                request_timeout_ms=120000,  # Reduced to 120 seconds - fail faster
-                delivery_timeout_ms=130000,  # Reduced to 130 seconds total
-                max_block_ms=180000,  # Reduced to 180 seconds - fail faster if buffer full
-                api_version_auto_timeout_ms=10000,
-                linger_ms=10,  # Reduced batching delay for faster sends
-                batch_size=32768,  # 32KB batch size (smaller for faster sends)
-                compression_type='lz4',  # Added compression to reduce network load
-                buffer_memory=67108864  # 64MB buffer (reduced to apply backpressure sooner)
-            )
+            # Default configuration
+            config = {
+                'bootstrap_servers': bootstrap_servers,
+                'value_serializer': lambda v: v if isinstance(v, bytes) else json.dumps(v).encode('utf-8'),
+                'acks': 1,  # Wait for leader acknowledgment
+                'retries': 10,  # Increased retries for reliability
+                'max_in_flight_requests_per_connection': 5,  # Reduced to prevent overwhelming broker
+                'request_timeout_ms': 120000,  # Reduced to 120 seconds - fail faster
+                'delivery_timeout_ms': 130000,  # Reduced to 130 seconds total
+                'max_block_ms': 180000,  # Reduced to 180 seconds - fail faster if buffer full
+                'api_version_auto_timeout_ms': 10000,
+                'linger_ms': 10,  # Reduced batching delay for faster sends
+                'batch_size': 32768,  # 32KB batch size (smaller for faster sends)
+                'compression_type': 'lz4',  # Added compression to reduce network load
+                'buffer_memory': 67108864  # 64MB buffer (reduced to apply backpressure sooner)
+            }
+            
+            # Override with provided kwargs
+            if kwargs:
+                config.update(kwargs)
+            
+            self.kafka_producer = KP(**config)
             logger.info(f"Kafka Producer initialized with bootstrap_servers: {bootstrap_servers}")
         except Exception as e:
             logger.error(f"Failed to initialize Kafka Producer: {e}")

@@ -8,4 +8,5 @@ dependencies = [
     "faker>=20.0.0",
     "requests>=2.31.0",
     "lz4>=4.4.5",
+    "fastavro>=1.12.1",
 ]
