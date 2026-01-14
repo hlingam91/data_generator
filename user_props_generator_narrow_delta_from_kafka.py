@@ -58,6 +58,7 @@ class UserPropsGeneratorNarrow:
         self.start_time = None
         self.end_time = None
         self.flush_interval = kwargs.get("flush_interval", 100)  # Flush every N messages
+        self.msg_format = kwargs.get("msg_format", "raw")  # "raw" or "insert_delete"
         
         self.num_fields_to_update = kwargs.get("num_fields_to_update", 2)
         
@@ -137,11 +138,7 @@ class UserPropsGeneratorNarrow:
     def _get_random_fields_to_update(self):
         """Select N random fields to update"""
         all_paths = self._get_all_property_paths()
-        if not all_paths:
-            return []
-        # Ensure we don't try to select more than available
-        count = min(self.num_fields_to_update, len(all_paths))
-        return random.sample(all_paths, count)
+        return random.sample(all_paths, self.num_fields_to_update)
 
     def generate_user_props(self, base_record_str=None):
         """Generate user properties record based on the fields and datatypes"""
@@ -171,7 +168,12 @@ class UserPropsGeneratorNarrow:
                     new_value = self._generate_value(field_name, field_type)
                     self._update_nested_value(user_props, field_path, new_value)
                 
-                return {"insert": user_props}
+                # Wrap in insert format based on msg_format config
+                if self.msg_format == "insert_delete":
+                    return {"insert": user_props}
+                else:
+                    # Return raw data directly
+                    return user_props
             except Exception as e:
                 logger.error(f"Failed to update record: {e}")
                 return None
@@ -310,6 +312,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_threads', type=int, default=None, help='Number of threads for parallel generation (overrides config file)')
     parser.add_argument('--num-fields', type=int, default=None, help='Number of fields to randomly update per record')
     parser.add_argument('--config', type=str, default=None, help='Path to config file (default: config.json)')
+    parser.add_argument('--msg-format', type=str, default='raw', choices=['raw', 'insert_delete'], help='Message format: raw (default) or insert_delete')
     
     args = parser.parse_args()
     
@@ -328,12 +331,14 @@ if __name__ == "__main__":
     logger.info(f"Destination Topic: {kafka_topic}")
     logger.info(f"Source Topic: {source_kafka_topic}")
     logger.info(f"Using {num_threads} threads")
+    logger.info(f"Using message format: {args.msg_format}")
     
     generator = UserPropsGeneratorNarrow(
         kafka_broker=kafka_broker,
         kafka_topic=kafka_topic,
         source_kafka_topic=source_kafka_topic,
         num_threads=num_threads,
-        num_fields_to_update=num_fields_to_update
+        num_fields_to_update=num_fields_to_update,
+        msg_format=args.msg_format
     )
     generator.run()

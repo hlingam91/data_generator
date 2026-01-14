@@ -65,6 +65,7 @@ class UserPropsGeneratorNarrow:
         self.start_time = None
         self.end_time = None
         self.flush_interval = kwargs.get("flush_interval", 100)  # Flush every N messages
+        self.msg_format = kwargs.get("msg_format", "raw")  # "raw" or "insert_delete"
         
         # Load BSINs from file if provided
         self.bsins = []
@@ -193,8 +194,12 @@ class UserPropsGeneratorNarrow:
             "merged_bsins": []
         })
         
-        # Wrap in insert format
-        return {"insert": user_props}
+        # Wrap in insert format based on msg_format config
+        if self.msg_format == "insert_delete":
+            return {"insert": user_props}
+        else:
+            # Return raw data directly
+            return user_props
 
     def _get_condition_value(self, field_name, conditions, should_match):
         """Extract the value needed for a field based on conditions"""
@@ -249,7 +254,9 @@ class UserPropsGeneratorNarrow:
             user_props = self.generate_user_props(should_match_condition=should_match)
             
             # Verify the condition evaluation (for tracking)
-            condition_met = self._evaluate_condition(user_props["insert"], parsed_conditions) if parsed_conditions else False
+            # Extract the actual user data based on msg_format
+            user_data = user_props["insert"] if self.msg_format == "insert_delete" else user_props
+            condition_met = self._evaluate_condition(user_data, parsed_conditions) if parsed_conditions else False
             
             with self.count_lock:
                 if condition_met:
@@ -311,7 +318,9 @@ class UserPropsGeneratorNarrow:
                 user_props = self.generate_user_props(should_match_condition=should_match)
                 
                 # Verify the condition evaluation (for tracking)
-                condition_met = self._evaluate_condition(user_props["insert"], parsed_conditions) if parsed_conditions else False
+                # Extract the actual user data based on msg_format
+                user_data = user_props["insert"] if self.msg_format == "insert_delete" else user_props
+                condition_met = self._evaluate_condition(user_data, parsed_conditions) if parsed_conditions else False
                 
                 if condition_met:
                     self.true_count += 1
@@ -361,6 +370,7 @@ if __name__ == "__main__":
     parser.add_argument('--num-threads', type=int, default=None, help='Number of threads for parallel generation (overrides config file)')
     parser.add_argument('--bsin-file', type=str, default=None, help='Path to file containing BSINs (overrides config file)')
     parser.add_argument('--config', type=str, default=None, help='Path to config file (default: config.json)')
+    parser.add_argument('--msg-format', type=str, default='raw', choices=['raw', 'insert_delete'], help='Message format: raw (default) or insert_delete')
     
     args = parser.parse_args()
     
@@ -386,6 +396,7 @@ if __name__ == "__main__":
     logger.info(f"Using Kafka Topic: {kafka_topic}")
     logger.info(f"Using {num_threads} threads")
     logger.info(f"Using BSIN file: {bsin_file}")
+    logger.info(f"Using message format: {args.msg_format}")
     
     generator = UserPropsGeneratorNarrow(
         kafka_broker=kafka_broker,
@@ -394,6 +405,7 @@ if __name__ == "__main__":
         target_true_count=args.target_true_count,
         conditional_fields=conditional_fields,
         num_threads=num_threads,
-        bsin_file=bsin_file
+        bsin_file=bsin_file,
+        msg_format=args.msg_format
     )
     generator.run()
