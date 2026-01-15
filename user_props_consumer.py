@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class UserPropsConsumer:
     """Consumer to extract unique BSINs from user properties messages"""
     
-    def __init__(self, bootstrap_servers="localhost:9092", topic="seg_poc_identity", group_id="user_props_consumer_group", output_file="data/bsins_extracted.txt"):
+    def __init__(self, bootstrap_servers="localhost:9092", topic="seg_poc_identity", group_id="user_props_consumer_group", output_file="data/bsins_extracted.txt", msg_format="insert_delete"):
         """
         Initialize Kafka Consumer
         
@@ -32,11 +32,13 @@ class UserPropsConsumer:
             topic: Topic name to consume from
             group_id: Consumer group ID
             output_file: Path to output file for BSINs
+            msg_format: Message format - "raw" or "insert_delete" (default: "insert_delete")
         """
         self.bootstrap_servers = bootstrap_servers
         self.topic = topic
         self.group_id = group_id
         self.output_file = output_file
+        self.msg_format = msg_format
         self.written_bsins = set()  # Track BSINs already written to file
         self.pending_bsins = []  # Buffer for BSINs to write
         self.total_messages = 0
@@ -105,16 +107,24 @@ class UserPropsConsumer:
                 for msg in value_str.strip(" ").strip("\n").split("\n"):
                     value_json = json.loads(msg)
                     
-                    # Check for insert or delete operation and extract BSIN
+                    # Extract BSIN based on msg_format
                     bsin = None
-                    if "insert" in value_json:
-                        bsin = value_json["insert"].get("bsin")
-                        self.insert_count += 1
-                    elif "delete" in value_json:
-                        bsin = value_json["delete"].get("bsin")
-                        self.delete_count += 1
+                    if self.msg_format == "insert_delete":
+                        # Format: {"insert": {"bsin": "...", ...}} or {"delete": {"bsin": "...", ...}}
+                        if "insert" in value_json:
+                            bsin = value_json["insert"].get("bsin")
+                            self.insert_count += 1
+                        elif "delete" in value_json:
+                            bsin = value_json["delete"].get("bsin")
+                            self.delete_count += 1
+                        else:
+                            logger.warning(f"Message at offset {message.offset} has neither 'insert' nor 'delete' key")
+                    elif self.msg_format == "raw":
+                        # Format: {"bsin": "...", "site_id": "...", ...}
+                        bsin = value_json.get("bsin")
+                        self.insert_count += 1  # Treat raw format as insert
                     else:
-                        logger.warning(f"Message at offset {message.offset} has neither 'insert' nor 'delete' key")
+                        logger.warning(f"Unknown msg_format: {self.msg_format}")
                     
                     if bsin and bsin not in self.written_bsins:
                         self.pending_bsins.append(bsin)
@@ -214,16 +224,21 @@ if __name__ == "__main__":
     # Load configuration
     ConfigLoader.load()
     default_brokers = ConfigLoader.get_kafka_brokers()
+    default_topic = ConfigLoader.get_kafka_topic("identity")
+    default_msg_format = ConfigLoader.get_default("msg_format", "insert_delete")
 
     parser = argparse.ArgumentParser(description='Consume user properties and extract unique BSINs')
     parser.add_argument('--bootstrap-servers', type=str, default=default_brokers, 
                         help=f'Kafka bootstrap servers (default: {default_brokers})')
-    parser.add_argument('--topic', type=str, default='seg_poc_identity', 
-                        help='Kafka topic to consume from (default: seg_poc_identity)')
+    parser.add_argument('--topic', type=str, default=default_topic, 
+                        help=f'Kafka topic to consume from (default: {default_topic})')
     parser.add_argument('--group-id', type=str, default='user_props_consumer_group', 
                         help='Consumer group ID (default: user_props_consumer_group)')
     parser.add_argument('--output-file', type=str, default='data/bsins_extracted.txt',
                         help='Output file path for BSINs (default: data/bsins_extracted.txt)')
+    parser.add_argument('--msg-format', type=str, default=default_msg_format, 
+                        choices=['raw', 'insert_delete'],
+                        help=f'Message format: raw or insert_delete (default: {default_msg_format})')
     
     args = parser.parse_args()
     
@@ -231,7 +246,9 @@ if __name__ == "__main__":
         bootstrap_servers=args.bootstrap_servers,
         topic=args.topic,
         group_id=args.group_id,
-        output_file=args.output_file
+        output_file=args.output_file,
+        msg_format=args.msg_format
     )
     
+    logger.info(f"Using message format: {args.msg_format}")
     consumer.consume()
