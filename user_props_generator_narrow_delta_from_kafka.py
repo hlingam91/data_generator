@@ -208,8 +208,8 @@ class UserPropsGeneratorNarrow:
                 continue
             
             # Push to Kafka
-            print(user_props)
-            # self.push_to_kafka(user_props)
+            # print(user_props)
+            self.push_to_kafka(user_props)
             
             local_count += 1
             # Periodic flush to avoid buffering

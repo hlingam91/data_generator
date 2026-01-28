@@ -19,7 +19,8 @@
   "defaults": {
     "site_id": "boomtrain",
     "num_threads": 5,
-    "flush_interval": 100
+    "flush_interval": 100,
+    "msg_format": "raw"
   }
 }
 
