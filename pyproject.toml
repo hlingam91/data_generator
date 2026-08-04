@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.10"
 dependencies = [
-    "kafka-python>=2.0.2",
+    "kafka-python>=3.0.0,<4",
     "faker>=20.0.0",
     "requests>=2.31.0",
     "lz4>=4.4.5",

@@ -28,11 +28,11 @@ class KafkaProducer:
                 'request_timeout_ms': 120000,  # Reduced to 120 seconds - fail faster
                 'delivery_timeout_ms': 130000,  # Reduced to 130 seconds total
                 'max_block_ms': 180000,  # Reduced to 180 seconds - fail faster if buffer full
-                'api_version_auto_timeout_ms': 10000,
+                'bootstrap_timeout_ms': 10000,  # kafka-python 3.x (was api_version_auto_timeout_ms)
                 'linger_ms': 10,  # Reduced batching delay for faster sends
                 'batch_size': 32768,  # 32KB batch size (smaller for faster sends)
                 'compression_type': 'lz4',  # Added compression to reduce network load
-                'buffer_memory': 67108864  # 64MB buffer (reduced to apply backpressure sooner)
+                # buffer_memory removed in kafka-python 3.x
             }
             
             # Override with provided kwargs
