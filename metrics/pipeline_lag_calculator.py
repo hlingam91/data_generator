@@ -11,17 +11,15 @@ Features:
 - Supports both config file and command-line arguments
 """
 
-import sys
-import os
-import json
-import logging
 import argparse
+import logging
+import os
+import sys
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 import requests
 from kafka import KafkaConsumer, TopicPartition
-from kafka.admin import KafkaAdminClient
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -52,69 +50,120 @@ class FelderaPipelineLagCalculator:
             kafka_brokers: Comma-separated Kafka broker addresses
             feldera_api_url: Base URL for Feldera API
             pipeline_name: Name of the Feldera pipeline
-            topics: List of Kafka topics to monitor
+            topics: Deprecated; connector topics are discovered from Feldera
             api_key: Optional API key for Feldera authentication
         """
         self.kafka_brokers = kafka_brokers
         self.feldera_api_url = feldera_api_url.rstrip('/')
         self.pipeline_name = pipeline_name
-        self.topics = topics
         self.api_key = api_key
         
         logger.info(f"Initialized calculator for pipeline: {pipeline_name}")
-        logger.info(f"Monitoring topics: {', '.join(topics)}")
+        if topics:
+            logger.info(
+                "Configured topics are retained for CLI compatibility; "
+                "pipeline connector topics will be discovered from Feldera"
+            )
+
+    def _headers(self) -> Dict[str, str]:
+        """Build headers for Feldera API requests."""
+        if self.api_key:
+            return {'Authorization': f"Bearer {self.api_key}"}
+        return {}
+
+    def get_feldera_pipeline_definition(self) -> Dict:
+        """Fetch the pipeline definition, including compiled input connectors."""
+        logger.info(f"Fetching Feldera pipeline definition for: {self.pipeline_name}")
+        url = f"{self.feldera_api_url}/v0/pipelines/{self.pipeline_name}"
+
+        response = requests.get(url, headers=self._headers(), timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+    def extract_kafka_connectors(self, pipeline: Dict) -> Dict[str, Dict]:
+        """Return Kafka connector configuration keyed by Feldera endpoint name."""
+        input_connectors = (
+            pipeline.get('program_info', {}).get('input_connectors', {})
+        )
+        connectors = {}
+
+        for endpoint_name, connector in input_connectors.items():
+            transport = connector.get('transport', {})
+            if transport.get('name') != 'kafka_input':
+                continue
+
+            config = transport.get('config', {})
+            topic = config.get('topic')
+            if not topic:
+                logger.warning(
+                    f"Skipping Kafka connector '{endpoint_name}' without a topic"
+                )
+                continue
+
+            connectors[endpoint_name] = {
+                'topic': topic,
+                'brokers': config.get('bootstrap.servers') or self.kafka_brokers,
+                'partitions': config.get('partitions'),
+                'paused': connector.get('paused', False),
+            }
+
+        if not connectors:
+            raise ValueError(
+                f"No Kafka input connectors found in pipeline '{self.pipeline_name}'"
+            )
+
+        logger.info(
+            f"Discovered {len(connectors)} Kafka input connectors from Feldera"
+        )
+        return connectors
     
-    def get_kafka_latest_offsets(self) -> Dict[str, Dict[int, int]]:
+    def get_kafka_latest_offsets(
+        self, connectors: Dict[str, Dict]
+    ) -> Dict[str, Dict[int, int]]:
         """
-        Get latest offsets for all partitions of monitored topics
+        Get latest offsets for every Kafka input connector.
         
         Returns:
-            Dictionary mapping topic -> {partition: offset}
+            Dictionary mapping endpoint name -> {partition: offset}
         """
         logger.info("Fetching latest Kafka offsets...")
         offsets = {}
         
-        try:
-            # Create consumer to fetch offsets
-            consumer = KafkaConsumer(
-                bootstrap_servers=self.kafka_brokers,
-                consumer_timeout_ms=5000
-            )
-            
-            # Collect all TopicPartitions to fetch in one call
-            topic_partitions = []
-            topic_partition_map = {}
-            
-            for topic in self.topics:
-                # Get partitions for this topic
-                partitions = consumer.partitions_for_topic(topic)
-                
+        for endpoint_name, connector in connectors.items():
+            topic = connector['topic']
+            consumer = None
+            try:
+                consumer = KafkaConsumer(
+                    bootstrap_servers=connector['brokers'],
+                    consumer_timeout_ms=5000
+                )
+                partitions = connector['partitions']
+                if partitions is None:
+                    partitions = consumer.partitions_for_topic(topic)
+
                 if partitions is None:
                     logger.warning(f"Topic '{topic}' not found or has no partitions")
                     continue
-                
-                offsets[topic] = {}
-                for partition in partitions:
-                    tp = TopicPartition(topic, partition)
-                    topic_partitions.append(tp)
-                    topic_partition_map[tp] = (topic, partition)
-            
-            # Fetch all end offsets in a single efficient API call
-            end_offsets = consumer.end_offsets(topic_partitions)
-            
-            # Map the results back to our structure
-            for tp, offset in end_offsets.items():
-                topic, partition = topic_partition_map[tp]
-                offsets[topic][partition] = offset
-                logger.debug(f"Topic: {topic}, Partition: {partition}, Latest Offset: {offset}")
-            
-            consumer.close()
-            logger.info(f"Successfully fetched offsets for {len(offsets)} topics")
-            return offsets
-            
-        except Exception as e:
-            logger.error(f"Error fetching Kafka offsets: {e}")
-            raise
+
+                topic_partitions = [
+                    TopicPartition(topic, partition) for partition in partitions
+                ]
+                end_offsets = consumer.end_offsets(topic_partitions)
+                offsets[endpoint_name] = {
+                    tp.partition: offset for tp, offset in end_offsets.items()
+                }
+            except Exception as e:
+                logger.error(
+                    f"Error fetching Kafka offsets for connector "
+                    f"'{endpoint_name}' (topic '{topic}'): {e}"
+                )
+                raise
+            finally:
+                if consumer is not None:
+                    consumer.close()
+
+        logger.info(f"Successfully fetched offsets for {len(offsets)} connectors")
+        return offsets
     
     def get_feldera_pipeline_stats(self) -> Dict:
         """
@@ -127,12 +176,8 @@ class FelderaPipelineLagCalculator:
         
         url = f"{self.feldera_api_url}/v0/pipelines/{self.pipeline_name}/stats"
          
-        headers = {}
-        if self.api_key:
-            headers['Authorization'] = f"Bearer {self.api_key}"
-        
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=self._headers(), timeout=30)
             response.raise_for_status()
             
             stats = response.json()
@@ -143,7 +188,9 @@ class FelderaPipelineLagCalculator:
             logger.error(f"Error fetching Feldera stats: {e}")
             raise
     
-    def extract_feldera_offsets(self, stats: Dict) -> Dict[str, Dict[int, int]]:
+    def extract_feldera_offsets(
+        self, stats: Dict, connectors: Dict[str, Dict]
+    ) -> Dict[str, Dict[int, int]]:
         """
         Extract consumed offsets from Feldera stats
         
@@ -151,71 +198,81 @@ class FelderaPipelineLagCalculator:
             stats: Feldera pipeline stats dictionary
             
         Returns:
-            Dictionary mapping topic -> {partition: offset}
+            Dictionary mapping endpoint name -> {partition: offset}
         """
         logger.info("Extracting Feldera consumed offsets from stats...")
-        feldera_offsets = {"seg_poc_identity":{},
-                           "seg_poc_events": {}
-                           }
+        feldera_offsets = {endpoint_name: {} for endpoint_name in connectors}
 
-        try:
-            # feldera offsets are in the "inputs": ["endpoint_name": "user_props_input.user_props",] -- "completed_frontier": {                 "metadata": {                     "offsets": [
-                        # {
-                        #     "end": 1410926,
-                        #     "start": 1410926
-                        # },]
-            # Navigate through stats structure to find input connector metrics
-            # Structure may vary - adjust based on actual API response
-            if 'inputs' in stats:   
-                for  idx, input_stats in enumerate(stats['inputs']):
-                    if input_stats['endpoint_name'].startswith("user_props") or input_stats['endpoint_name'].startswith("events"):
-                        topic_name = "seg_poc_identity" if input_stats['endpoint_name'].startswith("user_props") else "seg_poc_events"
-                        kafka_offsets = input_stats['completed_frontier']['metadata']["offsets"]
-                        
-                        # # Extract topic and partition info
-                        # if 'completed_frontier' in kafka_metrics:
-                        for idx, item in enumerate(kafka_offsets):
-                            item_end = item['end']
-                            item_start = item['start']
-                            feldera_offsets[topic_name][idx] = item_end
-            
-            logger.info(f"Extracted offsets for {len(feldera_offsets)} topics from Feldera")
-            return feldera_offsets    
-        except Exception as e:
-            print(f"Error extracting Feldera offsets: {e}")
-            logger.error(f"Error extracting Feldera offsets: {e}")
-            logger.debug(f"Stats structure: {json.dumps(stats, indent=2)}")
-            return {}
+        for input_stats in stats.get('inputs', []):
+            endpoint_name = input_stats.get('endpoint_name')
+            connector = connectors.get(endpoint_name)
+            if connector is None:
+                continue
+
+            frontier = input_stats.get('completed_frontier')
+            metadata = frontier.get('metadata', {}) if frontier else {}
+            offset_ranges = metadata.get('offsets')
+            if not offset_ranges:
+                logger.warning(
+                    f"Connector '{endpoint_name}' has no completed Kafka frontier"
+                )
+                continue
+
+            configured_partitions = connector.get('partitions')
+            if configured_partitions is None:
+                partition_ids = list(range(len(offset_ranges)))
+            else:
+                partition_ids = configured_partitions
+                if len(partition_ids) != len(offset_ranges):
+                    logger.warning(
+                        f"Connector '{endpoint_name}' reports {len(offset_ranges)} "
+                        f"offsets for {len(partition_ids)} configured partitions"
+                    )
+
+            feldera_offsets[endpoint_name] = {
+                partition: offset_range['end']
+                for partition, offset_range in zip(partition_ids, offset_ranges)
+            }
+
+        logger.info(
+            f"Extracted offsets for {len(feldera_offsets)} connectors from Feldera"
+        )
+        return feldera_offsets
     
     def calculate_lag(
         self,
         kafka_offsets: Dict[str, Dict[int, int]],
         feldera_offsets: Dict[str, Dict[int, int]]
-    ) -> Dict[str, Dict[int, int]]:
+    ) -> Dict[str, Dict[int, Optional[int]]]:
         """
         Calculate lag between Kafka and Feldera offsets
         
         Args:
-            kafka_offsets: Kafka latest offsets by topic and partition
-            feldera_offsets: Feldera consumed offsets by topic and partition
+            kafka_offsets: Kafka latest offsets by connector and partition
+            feldera_offsets: Feldera consumed offsets by connector and partition
             
         Returns:
-            Dictionary mapping topic -> {partition: lag}
+            Dictionary mapping endpoint name -> {partition: lag}; lag is None
+            when Feldera has not reported a completed offset.
         """
         logger.info("Calculating lag...")
         lag = {}
         
-        for topic, kafka_partitions in kafka_offsets.items():
-            lag[topic] = {}
-            feldera_partitions = feldera_offsets.get(topic, {})
+        for endpoint_name, kafka_partitions in kafka_offsets.items():
+            lag[endpoint_name] = {}
+            feldera_partitions = feldera_offsets.get(endpoint_name, {})
             
             for partition, kafka_offset in kafka_partitions.items():
-                feldera_offset = feldera_partitions.get(partition, 0)
-                partition_lag = kafka_offset - feldera_offset
-                lag[topic][partition] = partition_lag
+                feldera_offset = feldera_partitions.get(partition)
+                partition_lag = (
+                    kafka_offset - feldera_offset
+                    if feldera_offset is not None
+                    else None
+                )
+                lag[endpoint_name][partition] = partition_lag
                 
                 logger.debug(
-                    f"Topic: {topic}, Partition: {partition}, "
+                    f"Connector: {endpoint_name}, Partition: {partition}, "
                     f"Kafka: {kafka_offset}, Feldera: {feldera_offset}, Lag: {partition_lag}"
                 )
         
@@ -225,8 +282,9 @@ class FelderaPipelineLagCalculator:
         self,
         kafka_offsets: Dict[str, Dict[int, int]],
         feldera_offsets: Dict[str, Dict[int, int]],
-        lag: Dict[str, Dict[int, int]],
-        pipeline_stats: Dict
+        lag: Dict[str, Dict[int, Optional[int]]],
+        pipeline_stats: Dict,
+        connectors: Dict[str, Dict]
     ):
         """
         Print comprehensive lag report
@@ -241,7 +299,7 @@ class FelderaPipelineLagCalculator:
         print(f"FELDERA PIPELINE LAG REPORT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 80)
         print(f"Pipeline: {self.pipeline_name}")
-        print(f"Kafka Brokers: {self.kafka_brokers}")
+        print(f"Default Kafka Brokers: {self.kafka_brokers}")
         print(f"Feldera API: {self.feldera_api_url}")
         print("-" * 80)
         
@@ -250,51 +308,62 @@ class FelderaPipelineLagCalculator:
             print(f"Pipeline Status: {pipeline_stats['status']}")
         
         # Overall metrics
-        total_lag = sum(sum(partitions.values()) for partitions in lag.values())
-        total_kafka_messages = sum(
-            sum(partitions.values()) for partitions in kafka_offsets.values()
+        total_lag = sum(
+            partition_lag
+            for partitions in lag.values()
+            for partition_lag in partitions.values()
+            if partition_lag is not None
         )
-        total_feldera_consumed = sum(
-            sum(partitions.values()) for partitions in feldera_offsets.values()
+        missing_feldera_offsets = sum(
+            partition_lag is None
+            for partitions in lag.values()
+            for partition_lag in partitions.values()
         )
         
         print(f"\nOVERALL METRICS:")
-        print(f"  Total Kafka Messages: {total_kafka_messages:,}")
-        print(f"  Total Feldera Consumed: {total_feldera_consumed:,}")
-        print(f"  Total Lag: {total_lag:,}")
-        
-        if total_kafka_messages > 0:
-            consumption_rate = (total_feldera_consumed / total_kafka_messages) * 100
-            print(f"  Consumption Rate: {consumption_rate:.2f}%")
+        print(f"  Total Lag (reported partitions): {total_lag:,}")
+        print(f"  Partitions Without Feldera Offset: {missing_feldera_offsets:,}")
         
         # Per-topic breakdown
         print("\n" + "-" * 80)
         print("LAG BY TOPIC AND PARTITION:")
         print("-" * 80)
         
-        for topic in sorted(kafka_offsets.keys()):
-            kafka_partitions = kafka_offsets[topic]
-            feldera_partitions = feldera_offsets.get(topic, {})
-            lag_partitions = lag[topic]
+        for endpoint_name in sorted(kafka_offsets.keys()):
+            kafka_partitions = kafka_offsets[endpoint_name]
+            feldera_partitions = feldera_offsets.get(endpoint_name, {})
+            lag_partitions = lag[endpoint_name]
             
-            topic_total_lag = sum(lag_partitions.values())
+            topic_total_lag = sum(
+                value for value in lag_partitions.values() if value is not None
+            )
             
-            print(f"\nTopic: {topic}")
+            print(f"\nConnector: {endpoint_name}")
+            print(f"  Topic: {connectors[endpoint_name]['topic']}")
             print(f"  Total Lag: {topic_total_lag:,}")
             print(f"  {'Partition':<12} {'Kafka Offset':<18} {'Feldera Offset':<18} {'Lag':<12}")
             print(f"  {'-'*12} {'-'*18} {'-'*18} {'-'*12}")
             
             for partition in sorted(kafka_partitions.keys()):
                 kafka_off = kafka_partitions[partition]
-                feldera_off = feldera_partitions.get(partition, 0)
+                feldera_off = feldera_partitions.get(partition)
                 partition_lag = lag_partitions[partition]
                 
                 # Color code lag (if high)
-                lag_indicator = "⚠️ " if partition_lag > 10000 else "  "
+                lag_indicator = (
+                    "⚠️ " if partition_lag is not None and partition_lag > 10000
+                    else "  "
+                )
+                feldera_display = (
+                    f"{feldera_off:,}" if feldera_off is not None else "N/A"
+                )
+                lag_display = (
+                    f"{partition_lag:,}" if partition_lag is not None else "N/A"
+                )
                 
                 print(
                     f"  {lag_indicator}{partition:<10} {kafka_off:<18,} "
-                    f"{feldera_off:<18,} {partition_lag:<12,}"
+                    f"{feldera_display:<18} {lag_display:<12}"
                 )
         
         # Additional pipeline metrics
@@ -323,20 +392,28 @@ class FelderaPipelineLagCalculator:
     def run(self):
         """Execute the lag calculation and print report"""
         try:
-            # Fetch Kafka offsets
-            kafka_offsets = self.get_kafka_latest_offsets()
-            
+            pipeline_definition = self.get_feldera_pipeline_definition()
+            connectors = self.extract_kafka_connectors(pipeline_definition)
+
             # Fetch Feldera pipeline stats
             pipeline_stats = self.get_feldera_pipeline_stats()
             
             # Extract Feldera offsets from stats
-            feldera_offsets = self.extract_feldera_offsets(pipeline_stats)
+            feldera_offsets = self.extract_feldera_offsets(
+                pipeline_stats, connectors
+            )
+
+            # Fetch Kafka offsets after the Feldera snapshot so that offsets
+            # produced during collection cannot create a negative lag.
+            kafka_offsets = self.get_kafka_latest_offsets(connectors)
             
             # Calculate lag
             lag = self.calculate_lag(kafka_offsets, feldera_offsets)
             
             # Print comprehensive report
-            self.print_report(kafka_offsets, feldera_offsets, lag, pipeline_stats)
+            self.print_report(
+                kafka_offsets, feldera_offsets, lag, pipeline_stats, connectors
+            )
             
             return {
                 'kafka_offsets': kafka_offsets,
@@ -365,7 +442,7 @@ Examples:
     --kafka-brokers localhost:9092 \\
     --feldera-url https://feldera.example.com \\
     --pipeline my_pipeline \\
-    --topics topic1,topic2
+    --topics topic1,topic2  # Deprecated; topics are discovered from Feldera
 
   # With API key authentication
   python pipeline_lag_calculator.py --api-key YOUR_API_KEY
@@ -396,7 +473,7 @@ Examples:
     parser.add_argument(
         '--topics',
         type=str,
-        help='Comma-separated list of Kafka topics to monitor (overrides config)'
+        help='Deprecated; Kafka topics are discovered from pipeline connectors'
     )
     parser.add_argument(
         '--api-key',
@@ -447,10 +524,6 @@ Examples:
     
     if not pipeline_name:
         logger.error("Pipeline name not provided. Set in config or use --pipeline")
-        sys.exit(1)
-    
-    if not topics:
-        logger.error("No topics specified. Set in config or use --topics")
         sys.exit(1)
     
     # Create calculator and run
