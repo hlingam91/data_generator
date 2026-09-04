@@ -26,7 +26,14 @@ logger = logging.getLogger(__name__)
 class UserPropsConsumer:
     """Consumer to extract unique BSINs from user properties messages"""
     
-    def __init__(self, bootstrap_servers="localhost:9092", topic="seg_poc_identity", group_id="user_props_consumer_group", output_file="data/bsins_extracted.txt"):
+    def __init__(
+        self,
+        bootstrap_servers="localhost:9092",
+        topic="seg_poc_identity",
+        group_id="user_props_consumer_group_sep4_2pm",
+        output_file="data/bsins_extracted.txt",
+        msg_format="raw",
+    ):
         """
         Initialize Kafka Consumer
         
@@ -35,11 +42,19 @@ class UserPropsConsumer:
             topic: Topic name to consume from
             group_id: Consumer group ID
             output_file: Path to output file for BSINs
+            msg_format: Message format, either raw or insert_delete
         """
+        if msg_format not in {"raw", "insert_delete"}:
+            raise ValueError(
+                f"Unsupported message format '{msg_format}'. "
+                "Expected 'raw' or 'insert_delete'."
+            )
+
         self.bootstrap_servers = bootstrap_servers
         self.topic = topic
         self.group_id = group_id
         self.output_file = output_file
+        self.msg_format = msg_format
         self.written_bsins = set()  # Track BSINs already written to file
         self.pending_bsins = []  # Buffer for BSINs to write
         self.total_messages = 0
@@ -80,9 +95,8 @@ class UserPropsConsumer:
         try:
             # Ensure data directory exists
             os.makedirs(os.path.dirname(self.output_file), exist_ok=True)
-            
-            # Create empty file (clear if exists)
-            with open(self.output_file, 'w') as f:
+
+            with open(self.output_file, 'a') as f:
                 pass
             
             logger.info(f"Initialized output file: {self.output_file}")
@@ -108,16 +122,21 @@ class UserPropsConsumer:
                 for msg in value_str.strip(" ").strip("\n").split("\n"):
                     value_json = json.loads(msg)
                     
-                    # Check for insert or delete operation and extract BSIN
-                    bsin = None
-                    if "insert" in value_json:
-                        bsin = value_json["insert"].get("bsin")
-                        self.insert_count += 1
-                    elif "delete" in value_json:
-                        bsin = value_json["delete"].get("bsin")
-                        self.delete_count += 1
+                    if self.msg_format == "raw":
+                        bsin = value_json.get("bsin")
                     else:
-                        logger.warning(f"Message at offset {message.offset} has neither 'insert' nor 'delete' key")
+                        bsin = None
+                        if "insert" in value_json:
+                            bsin = value_json["insert"].get("bsin")
+                            self.insert_count += 1
+                        elif "delete" in value_json:
+                            bsin = value_json["delete"].get("bsin")
+                            self.delete_count += 1
+                        else:
+                            logger.warning(
+                                f"Message at offset {message.offset} has neither "
+                                "'insert' nor 'delete' key"
+                            )
                     
                     if bsin and bsin not in self.written_bsins:
                         self.pending_bsins.append(bsin)
@@ -205,36 +224,44 @@ class UserPropsConsumer:
         print("\n" + "="*70)
         print("USER PROPERTIES CONSUMER REPORT")
         print("="*70)
+        print(f"Message Format: {self.msg_format}")
         print(f"Total Messages Processed: {self.total_messages}")
-        print(f"Insert Operations: {self.insert_count}")
-        print(f"Delete Operations: {self.delete_count}")
+        if self.msg_format == "insert_delete":
+            print(f"Insert Operations: {self.insert_count}")
+            print(f"Delete Operations: {self.delete_count}")
         print(f"Unique BSINs Written: {len(self.written_bsins)}")
         print(f"Output File: {self.output_file}")
         print("="*70 + "\n")
 
 
 if __name__ == "__main__":
-    # Load configuration
-    ConfigLoader.load()
-    default_brokers = ConfigLoader.get_kafka_brokers()
-
     parser = argparse.ArgumentParser(description='Consume user properties and extract unique BSINs')
-    parser.add_argument('--bootstrap-servers', type=str, default=default_brokers, 
-                        help=f'Kafka bootstrap servers (default: {default_brokers})')
-    parser.add_argument('--topic', type=str, default='seg_poc_identity', 
-                        help='Kafka topic to consume from (default: seg_poc_identity)')
+    parser.add_argument('--config', type=str, default='config.json',
+                        help='Path to configuration file (default: config.json)')
+    parser.add_argument('--bootstrap-servers', type=str, default=None,
+                        help='Kafka bootstrap servers (overrides config)')
+    parser.add_argument('--topic', type=str, default=None,
+                        help='Kafka topic (overrides kafka.topics.identity in config)')
     parser.add_argument('--group-id', type=str, default='user_props_consumer_group', 
                         help='Consumer group ID (default: user_props_consumer_group)')
     parser.add_argument('--output-file', type=str, default='data/bsins_extracted.txt',
                         help='Output file path for BSINs (default: data/bsins_extracted.txt)')
+    parser.add_argument('--msg-format', choices=['raw', 'insert_delete'], default=None,
+                        help='Message format (overrides defaults.msg_format in config)')
     
     args = parser.parse_args()
+    ConfigLoader.load(args.config)
+
+    bootstrap_servers = args.bootstrap_servers or ConfigLoader.get_kafka_brokers()
+    topic = args.topic or ConfigLoader.get_kafka_topic("identity")
+    msg_format = args.msg_format or ConfigLoader.get_default("msg_format", "raw")
     
     consumer = UserPropsConsumer(
-        bootstrap_servers=args.bootstrap_servers,
-        topic=args.topic,
+        bootstrap_servers=bootstrap_servers,
+        topic=topic,
         group_id=args.group_id,
-        output_file=args.output_file
+        output_file=args.output_file,
+        msg_format=msg_format,
     )
     
     consumer.consume()
